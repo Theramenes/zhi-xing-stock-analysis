@@ -17,7 +17,7 @@ def generate_overview_report(result) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     lines = []; L = lines.append
     L(f"# {result.sector_name}行业分析")
-    L(f"> {now} | iFind | {result.total_stocks}只 | {len(result.groups)}细分行业")
+    L(f"> {now}  iFind  {result.total_stocks}只  {len(result.groups)}细分行业")
     L("")
     _section1_overview(lines, result)
     return "\n".join(lines)
@@ -36,10 +36,10 @@ def generate_b1_report(combined: dict) -> str:
     ban_info = ""
     if banned:
         ban_types = sorted(set(c[:3] for c in banned))
-        ban_info = f" | 已排除{', '.join(ban_types)}xx共{len(banned)}只"
-    L(f"> {now} | iFind | {ov.total_stocks if ov else '?'}只成分股{ban_info}")
+        ban_info = f"  已排除{', '.join(ban_types)}xx共{len(banned)}只"
+    L(f"> {now}  iFind  {ov.total_stocks if ov else '?'}只成分股{ban_info}")
     if b1:
-        L(f"> B1:{len(b1.b1_stocks)} | 近B1:{len(b1.near_b1_stocks)} | 趋势持有:{len(b1.trend_hold_stocks)} | 缩爆:{len(b1.suo_bao_candidates)} | {b1.elapsed:.0f}s")
+        L(f"> B1:{len(b1.b1_stocks)}  近B1:{len(b1.near_b1_stocks)}  趋势持有:{len(b1.trend_hold_stocks)}  缩爆:{len(b1.suo_bao_candidates)}  {b1.elapsed:.0f}s")
     L("")
 
     # ==== Section 1: 行业板块分析 ====
@@ -135,7 +135,7 @@ def _section1_overview(lines, ov):
     # 涨跌停
     total_up = sum(g.limit_up_count for g in ov.groups.values())
     total_down = sum(g.limit_down_count for g in ov.groups.values())
-    L(f"**涨停: {total_up} | 跌停: {total_down}**")
+    L(f"**涨停: {total_up}  跌停: {total_down}**")
     L("")
 
 
