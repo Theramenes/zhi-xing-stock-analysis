@@ -18,6 +18,9 @@ data/*result*.json
 .vscode/
 .idea/
 
+# 数据库
+*.db
+
 # 备份
 *.bak
 *~
