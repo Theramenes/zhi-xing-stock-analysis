@@ -99,7 +99,7 @@ class IFindClient(DataSource):
 
         for name, method in [
             ("history", lambda: self._try_history(code, start_date, end_date)),
-            ("snapshot", lambda: self._try_snapshot_range(code, start_date, end_date)),
+            ("snapshot", lambda: self._try_snapshot(code, start_date) if start_date == end_date else None),
             ("date_sequence", lambda: self._try_date_sequence(code, start_date, end_date)),
         ]:
             resp = method()
@@ -237,31 +237,6 @@ class IFindClient(DataSource):
                 volume=vol / 100 if abs(vol) > 100000 else abs(vol),
             ))
         return DataResponse(ok=True, candles=candles, source=f"{self.name}/snapshot")
-
-    def _try_snapshot_range(self, code: str, start_date: str, end_date: str) -> Optional[DataResponse]:
-        """
-        连续日期走 snapshot。>5天缺口跳过，≤5天逐日调 _try_snapshot。
-        """
-        from datetime import datetime, timedelta
-        try:
-            s = datetime.strptime(start_date, "%Y-%m-%d")
-            e = datetime.strptime(end_date, "%Y-%m-%d")
-            if (e - s).days > 5:
-                return None
-        except ValueError:
-            return None
-
-        all_candles = []
-        current = s
-        while current <= e:
-            resp = self._try_snapshot(code, current.strftime("%Y-%m-%d"))
-            if resp and resp.candles:
-                all_candles.extend(resp.candles)
-            current += timedelta(days=1)
-
-        if all_candles:
-            return DataResponse(ok=True, candles=all_candles, source=f"{self.name}/snapshot")
-        return None
 
     # ============================================================
     # ④ freeStockLine — 免费源兜底
