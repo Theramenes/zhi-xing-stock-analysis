@@ -70,11 +70,11 @@ python cli.py indicator --symbol 603206 --input ../data/scan_cache/002460.json
 ## 命令速查
 
 ```bash
-python scripts/cli.py scan-sector-overview --name 电池      # 板块概览
-python scripts/cli.py scan-sector-b1 --name 电池            # 个股B1扫描
-python scripts/cli.py scan-sector-b1 --name 电池 --publish  # 扫描+发飞书
-python scripts/cli.py indicator --symbol 603206             # 单股指标
-python scripts/cli.py list-sectors                          # 已知板块列表
+python scripts/cli.py scan-sector-overview --name 电池       # 板块概览 → 默认发飞书
+python scripts/cli.py scan-sector-b1 --name 电池             # B1扫描 → 默认发飞书
+python scripts/cli.py scan-sector-b1 --name 电池 --no-publish # 仅本地，不发飞书
+python scripts/cli.py indicator --symbol 603206              # 单股指标
+python scripts/cli.py list-sectors                           # 已知板块列表
 ```
 
 ## 目录结构

@@ -99,7 +99,8 @@ def cmd_scan_overview(args):
     print(f"\n报告: {path}")
     print(f"股票: {result.total_stocks}  细分行业: {len(result.groups)}  耗时: {result.elapsed:.0f}s")
 
-    if args.publish:
+    # 默认发飞书
+    if not args.no_publish:
         from reporting.feishu_publisher import publish_report, notify_scan_complete
         url = publish_report(path, title=f"{result.sector_name}板块概览")
         if url:
@@ -154,7 +155,8 @@ def cmd_scan_b1(args):
     if combined.get("banned"):
         print(f"已排除: {len(combined['banned'])}只 ({', '.join(combined['banned'][:8])})")
 
-    if args.publish:
+    # 默认发飞书
+    if not args.no_publish:
         from reporting.feishu_publisher import publish_report, notify_scan_complete
         url = publish_report(path, title=f"{name}B1扫描")
         if url:
@@ -291,8 +293,7 @@ def main():
     p_overview = sub.add_parser("scan-sector-overview", help="板块概览（走势/资金/龙头/异动，不扫个股）")
     p_overview.add_argument("--name", "-n", required=True, help="板块查询（如：电池、锂电专用设备）")
     p_overview.add_argument("--output", "-o", help="报告输出路径")
-    p_overview.add_argument("--publish", action="store_true", help="发布到飞书")
-    p_overview.add_argument("--folder", help="飞书文件夹token")
+    p_overview.add_argument("--no-publish", action="store_true", help="跳过飞书发布")
 
     # scan-sector-b1 (个股B1扫描)
     p_b1 = sub.add_parser("scan-sector-b1", help="板块B1扫描（逐只K线+知行指标）")
@@ -301,8 +302,7 @@ def main():
     p_b1.add_argument("--workers", type=int, default=20, help="并行线程数")
     p_b1.add_argument("--days", type=int, default=120, help="K线天数（B1需要114天）")
     p_b1.add_argument("--no-cache", action="store_true", help="禁用缓存")
-    p_b1.add_argument("--publish", action="store_true", help="发布到飞书")
-    p_b1.add_argument("--folder", help="飞书文件夹token")
+    p_b1.add_argument("--no-publish", action="store_true", help="跳过飞书发布")
 
     # scan-market (stub)
     p_mkt = sub.add_parser("scan-market", help="全市场扫描（以板块为单元循环）")
