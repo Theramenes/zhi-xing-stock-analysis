@@ -27,6 +27,10 @@ CREATE TABLE IF NOT EXISTS stock_daily (
 );
 
 CREATE INDEX IF NOT EXISTS idx_code_date ON stock_daily(code, date);
+
+CREATE TABLE IF NOT EXISTS trading_calendar (
+    date TEXT PRIMARY KEY
+);
 """
 
 
@@ -117,6 +121,73 @@ class StockDB:
             [code] + trading_days
         ).fetchall())
         return [d for d in trading_days if d not in existing]
+
+    # ============================================================
+    # 交易日历
+    # ============================================================
+
+    def ensure_trading_calendar(self, start: str = "2025-01-01", end: str = None) -> int:
+        """
+        从 date_sequence 获取交易日历并缓存。
+        已有数据不重复拉取。返回新增天数。
+        """
+        from datetime import datetime
+        if end is None:
+            end = datetime.now().strftime("%Y-%m-%d")
+
+        # 检查是否已有足够数据
+        existing = self.conn.execute(
+            "SELECT MIN(date), MAX(date), COUNT(*) FROM trading_calendar"
+        ).fetchone()
+        if existing and existing[2] and existing[1] >= end[:10]:
+            return 0  # 已是最新
+
+        print(f"  [calendar] 更新交易日历 {start} ~ {end}...")
+        from data_source.ifind_client import IFindClient
+        client = IFindClient()
+        data = client._http(
+            "/date_sequence",
+            {"codes": "000001.SH", "startdate": start, "enddate": end,
+             "functionpara": {"Days": "Tradedays", "Fill": "Omit"},
+             "indipara": [{"indicator": "ths_close_price_stock", "indiparams": ["", "", ""]}]},
+            timeout=15
+        )
+        if not data or data.get("errorcode") != 0:
+            return 0
+
+        tables = data.get("tables", [])
+        if not tables:
+            return 0
+
+        days = tables[0].get("time", [])
+        count = 0
+        with self.conn:
+            for d in days:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO trading_calendar (date) VALUES (?)", (d[:10],)
+                )
+                count += 1
+        print(f"  [calendar] 新增 {count} 个交易日")
+        return count
+
+    def get_trading_days(self, start: str, end: str) -> List[str]:
+        """从本地缓存取交易日列表"""
+        self.ensure_trading_calendar()
+        rows = self.conn.execute(
+            "SELECT date FROM trading_calendar WHERE date >= ? AND date <= ? ORDER BY date",
+            (start, end)
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def get_last_trading_day(self, before: str = None) -> Optional[str]:
+        """最近一个交易日"""
+        from datetime import datetime
+        if before is None:
+            before = datetime.now().strftime("%Y-%m-%d")
+        row = self.conn.execute(
+            "SELECT MAX(date) FROM trading_calendar WHERE date <= ?", (before,)
+        ).fetchone()
+        return row[0] if row else None
 
     # ============================================================
     # 统计

@@ -32,14 +32,14 @@ def ensure_candles(code: str, required_days: int = 114) -> List[dict]:
     if len(candles) >= required_days:
         return candles
 
-    # 2. 算缺口（只看最近 required_days*3 个日历日，约160交易日，远超114）
+    # 2. 从本地交易日历算缺口（不再每次调 API）
     from datetime import timedelta
     today = datetime.now()
     start = (today - timedelta(days=required_days * 3)).strftime("%Y-%m-%d")
     end = today.strftime("%Y-%m-%d")
-    trading_days = _get_trading_days(start, end)
+    trading_days = db.get_trading_days(start, end)  # 本地缓存
     if not trading_days:
-        print(f"  [filler] 无法获取交易日历，返回现有 {len(candles)} 天")
+        print(f"  [filler] 无交易日历，返回现有 {len(candles)} 天")
         return candles
 
     missing = db.get_missing_dates(code, trading_days)
@@ -74,27 +74,6 @@ def ensure_candles(code: str, required_days: int = 114) -> List[dict]:
         print(f"  [filler] {code}: 补缺 {filled} 条")
 
     return db.get_candles(code, required_days)
-
-
-def _get_trading_days(start: str, end: str) -> List[str]:
-    """获取交易日历（走 date_sequence，不耗历史配额）"""
-    from data_source.ifind_client import IFindClient
-    client = IFindClient()
-    try:
-        data = client._http(
-            "/date_sequence",
-            {"codes": "000001.SH", "startdate": start, "enddate": end,
-             "functionpara": {"Days": "Tradedays", "Fill": "Omit"},
-             "indipara": [{"indicator": "ths_close_price_stock", "indiparams": ["", "", ""]}]},
-            timeout=10
-        )
-        if data and data.get("errorcode") == 0:
-            tables = data.get("tables", [])
-            if tables:
-                return tables[0].get("time", [])
-    except Exception:
-        pass
-    return []
 
 
 def _batch_dates(dates: List[str]) -> List[tuple]:

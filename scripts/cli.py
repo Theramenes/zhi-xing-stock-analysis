@@ -100,9 +100,11 @@ def cmd_scan_overview(args):
     print(f"股票: {result.total_stocks}  细分行业: {len(result.groups)}  耗时: {result.elapsed:.0f}s")
 
     if args.publish:
-        from reporting.feishu_publisher import publish_report
+        from reporting.feishu_publisher import publish_report, notify_scan_complete
         url = publish_report(path, title=f"{result.sector_name}板块概览")
-        if url: print(f"飞书: {url}")
+        if url:
+            print(f"飞书: {url}")
+            notify_scan_complete(result.sector_name, 0, 0, url)
 
 
 def cmd_scan_b1(args):
@@ -153,9 +155,12 @@ def cmd_scan_b1(args):
         print(f"已排除: {len(combined['banned'])}只 ({', '.join(combined['banned'][:8])})")
 
     if args.publish:
-        from reporting.feishu_publisher import publish_report
+        from reporting.feishu_publisher import publish_report, notify_scan_complete
         url = publish_report(path, title=f"{name}B1扫描")
-        if url: print(f"飞书: {url}")
+        if url:
+            print(f"飞书: {url}")
+            if b1:
+                notify_scan_complete(name, len(b1.b1_stocks), len(b1.near_b1_stocks), url)
 
 
 def cmd_scan_market(args):
