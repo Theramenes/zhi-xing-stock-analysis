@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.env
+
+# 数据缓存（本地，不上传）
+data/scan_cache/
+data/reports/
+
+# 临时测试文件
+data/_*
+data/*_test*
+data/*_debug*
+data/*result*.json
+
+# IDE
+.vscode/
+.idea/
+
+# 备份
+*.bak
+*~
