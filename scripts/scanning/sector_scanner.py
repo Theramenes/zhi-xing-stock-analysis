@@ -350,17 +350,11 @@ class SectorB1Scanner:
         return result
 
     def _fetch(self, code: str, days: int) -> Optional[list]:
-        if self.cache:
-            c = self.cache.load_candles(code)
-            if c and len(c) >= 100: return c
-        ifind = ds_registry.get_source("ifind")
-        if ifind and ifind.is_available():
-            from datetime import datetime, timedelta
-            end = datetime.now().strftime("%Y-%m-%d")
-            start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y-%m-%d")
-            resp = ifind.get_kline_range(code, start, end)
-            if resp.ok and resp.candles:
-                return [{"date": c.date, "open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume} for c in resp.candles]
-        if self.cache:
-            return self.cache.load_candles(code)
-        return None
+        """获取K线：优先 SQLite → 不够则四源降级补缺 → 返回"""
+        from storage.kline_filler import ensure_candles
+        candles = ensure_candles(code, required_days=114)
+        if candles and len(candles) >= 30:
+            return candles
+        # SQLite 兜底
+        from storage.db import get_db
+        return get_db().get_candles(code, days)
