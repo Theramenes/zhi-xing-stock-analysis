@@ -25,12 +25,18 @@ def notify_scan_complete(sector: str, b1_count: int, near_count: int, url: str =
         lines.append(url)
     text = "\n".join(lines)
 
+    import os
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    # 全路径避免 PATH 问题
+    lark_cli = os.path.expanduser(r"~\AppData\Roaming\npm\lark-cli.cmd")
     r = subprocess.run(
-        ["lark-cli", "im", "+messages-send",
+        [lark_cli, "im", "+messages-send",
          "--user-id", FEISHU_BOT_USER_ID,
          "--text", text,
          "--as", "bot"],
-        capture_output=True, text=True, timeout=10
+        capture_output=True, text=True, timeout=10,
+        encoding="utf-8", errors="replace", env=env
     )
     return '"ok": true' in (r.stdout or "")
 
