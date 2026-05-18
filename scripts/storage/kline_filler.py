@@ -52,6 +52,7 @@ def ensure_candles(code: str, required_days: int = 114) -> List[dict]:
     print(f"  [filler] {code}: DB有{len(candles)}天, 补最近{len(missing)}天...")
 
     # 3. 四源降级补缺（按日期分组，减少 API 调用）
+    import time as _time
     from data_source.ifind_client import IFindClient
     from data_source.config import config
 
@@ -68,6 +69,7 @@ def ensure_candles(code: str, required_days: int = 114) -> List[dict]:
                     for c in resp.candles]
             n = db.upsert_candles(code, rows)
             filled += n
+        _time.sleep(0.3)  # 避免打爆 API
     if filled:
         print(f"  [filler] {code}: 补缺 {filled} 条")
 
