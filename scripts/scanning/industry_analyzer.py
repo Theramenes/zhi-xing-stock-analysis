@@ -216,7 +216,7 @@ def parse_stock_overview_from_ifind(table: dict, keys: list) -> List[StockOvervi
 
         biz_raw = str(biz_col[i]) if i < len(biz_col) and biz_col[i] else ''
         # 主营业务: 优先概念解析, 其次主营产品名称, 最后用三级行业名
-        biz_final = biz_raw[:30] if biz_raw else industry.split('-')[-1] if industry else ''
+        biz_final = biz_raw[:100] if biz_raw else industry.split('-')[-1] if industry else ''
 
         stocks.append(StockOverview(
             code=code, name=name, industry_path=industry, biz=biz_final,
