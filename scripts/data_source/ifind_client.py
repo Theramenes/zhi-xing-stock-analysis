@@ -99,7 +99,7 @@ class IFindClient(DataSource):
 
         for name, method in [
             ("history", lambda: self._try_history(code, start_date, end_date)),
-            ("snapshot", lambda: self._try_snapshot(code, start_date, end_date)),
+            ("snapshot", lambda: self._try_snapshot_range(code, start_date, end_date)),
             ("date_sequence", lambda: self._try_date_sequence(code, start_date, end_date)),
         ]:
             resp = method()
@@ -195,55 +195,68 @@ class IFindClient(DataSource):
     # ③ snap_shot (THS_SS) — 日快照，盘中/盘后 OHLCV
     # ============================================================
 
-    def _try_snapshot(self, code: str, start_date: str, end_date: str) -> Optional[DataResponse]:
+    def _try_snapshot(self, code: str, date_str: str) -> Optional[DataResponse]:
         """
-        日快照 THS_SS — 只能单日查询，start == end，时间必须是 15:00:00。
+        日快照 THS_SS — 单日查询，starttime==endtime==15:00:00。
         THS_SS('300083.SZ','tradeDate;open;high;low;latest;volume','','2026-05-11 15:00:00','2026-05-11 15:00:00')
-
-        适合增量更新（缺1-2天时用），大批量缺数据时应走 date_sequence。
         """
-        # 计算日期差：超过 5 天不用 snapshot（太多次 API 调用）
+        payload = {
+            "codes": code,
+            "indicators": "tradeDate;open;high;low;latest;volume",
+            "starttime": f"{date_str} 15:00:00",
+            "endtime": f"{date_str} 15:00:00",
+        }
+        data = self._http("https://ft.10jqka.com.cn/api/v1/snap_shot", payload)
+        if not data or data.get("errorcode") != 0:
+            return None
+
+        tables = data.get("tables", [])
+        if not tables:
+            return None
+
+        tb = tables[0].get("table", {})
+        times = tables[0].get("time", [])
+        if not times:
+            return None
+
+        opens = tb.get("open", [])
+        highs = tb.get("high", [])
+        lows = tb.get("low", [])
+        closes = tb.get("latest", [])
+        vols = tb.get("volume", [])
+
+        candles = []
+        for i in range(len(times)):
+            vol = vols[i] if i < len(vols) else 0
+            candles.append(Candle(
+                date=str(times[i])[:10] if len(str(times[i])) > 10 else str(times[i]),
+                open=opens[i] if i < len(opens) else 0,
+                high=highs[i] if i < len(highs) else 0,
+                low=lows[i] if i < len(lows) else 0,
+                close=closes[i] if i < len(closes) else 0,
+                volume=vol / 100 if abs(vol) > 100000 else abs(vol),
+            ))
+        return DataResponse(ok=True, candles=candles, source=f"{self.name}/snapshot")
+
+    def _try_snapshot_range(self, code: str, start_date: str, end_date: str) -> Optional[DataResponse]:
+        """
+        连续日期走 snapshot。>5天缺口跳过，≤5天逐日调 _try_snapshot。
+        """
         from datetime import datetime, timedelta
         try:
             s = datetime.strptime(start_date, "%Y-%m-%d")
             e = datetime.strptime(end_date, "%Y-%m-%d")
             if (e - s).days > 5:
-                return None  # 批量缺口，跳过 snapshot
+                return None
         except ValueError:
             return None
 
-        # 只取单日 snapshot
         all_candles = []
         current = s
         while current <= e:
-            date_str = current.strftime("%Y-%m-%d")
-            payload = {
-                "codes": code,
-                "indicators": "tradeDate;open;high;low;latest;volume",
-                "starttime": f"{date_str} 15:00:00",
-                "endtime": f"{date_str} 15:00:00",
-            }
-            data = self._http("https://ft.10jqka.com.cn/api/v1/snap_shot", payload)
-            if data and data.get("errorcode") == 0:
-                tables = data.get("tables", [])
-                if tables:
-                    tb = tables[0].get("table", {})
-                    times = tables[0].get("time", [])
-                    opens = tb.get("open", [])
-                    highs = tb.get("high", [])
-                    lows = tb.get("low", [])
-                    closes = tb.get("latest", [])  # snapshot 用 latest
-                    vols = tb.get("volume", [])
-                    for i in range(len(times)):
-                        vol = vols[i] if i < len(vols) else 0
-                        all_candles.append(Candle(
-                            date=str(times[i])[:10] if len(str(times[i])) > 10 else str(times[i]),
-                            open=opens[i] if i < len(opens) else 0,
-                            high=highs[i] if i < len(highs) else 0,
-                            low=lows[i] if i < len(lows) else 0,
-                            close=closes[i] if i < len(closes) else 0,
-                            volume=vol / 100 if abs(vol) > 100000 else abs(vol),
-                        ))
+            resp = self._try_snapshot(code, current.strftime("%Y-%m-%d"))
+            if resp and resp.candles:
+                all_candles.extend(resp.candles)
             current += timedelta(days=1)
 
         if all_candles:
