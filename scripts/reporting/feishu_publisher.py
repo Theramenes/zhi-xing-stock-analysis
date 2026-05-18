@@ -2,7 +2,7 @@
 飞书发布器 — 云文档发布 + Bot 消息通知
 """
 import subprocess
-from .publish_to_feishu import publish_file as _publish_file
+from .generate_feishu_doc import publish_file as _publish_file
 
 
 # 飞书 Bot 通知配置

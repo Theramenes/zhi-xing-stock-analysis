@@ -62,7 +62,7 @@ def generate_b1_report(combined: dict) -> str:
         L("| 名称代码 | 主营业务 | 推荐理由 |")
         L("| --- | ------ | ----- |")
         for s in b1.b1_stocks[:10]:
-            biz = _get_biz(s.code, ov)
+            biz = _get_biz(s.code, ov, max_len=60)
             multi = len(s.信号)
             理由 = f"{'+'.join(s.信号[:2])}"
             if multi >= 3: 理由 += " 三重共振"
@@ -128,7 +128,7 @@ def _section1_overview(lines, ov):
             if abs(s.change_pct) >= 5: reason.append(f"{'涨' if s.change_pct>0 else '跌'}{abs(s.change_pct):.0f}%")
             if s.volume_ratio >= 3: reason.append(f"量比{s.volume_ratio:.0f}x")
             if abs(s.fund_flow) >= 5e8: reason.append(f"资金{_fmt_flow(s.fund_flow/1e8)}")
-            L(f"| {s.name}({s.code}) | {_get_biz(s.code, ov)} | {'; '.join(reason) if reason else '异动'} |")
+            L(f"| {s.name}({s.code}) | {_get_biz(s.code, ov, max_len=60)} | {'; '.join(reason) if reason else '异动'} |")
         if len(seen) >= 10: break
     L("")
 
@@ -187,18 +187,18 @@ def _stock_table(L, stocks, ov):
         L(f"| {s.name}({s.code}) | {biz} | {ind_short} | {s.last:.2f} | {_fmt_pct(chg)} | {turnover:.1f}% | {vol_ratio:.1f} | {vol_str} | {sig} |")
 
 
-def _get_biz(code, ov):
+def _get_biz(code, ov, max_len=30):
     """从 overview stocks 取主营业务，fallback 到三级行业名。转义 | 防表格错位"""
     if ov:
         for s in ov.stocks:
             if s.code == code:
                 raw = ''
                 if hasattr(s, 'biz') and s.biz and s.biz != s.industry_path.split('-')[-1]:
-                    raw = s.biz[:30]
+                    raw = s.biz[:max_len]
                 else:
                     parts = s.industry_path.split('-')
                     raw = parts[-1] if parts else ''
-                return raw.replace('|', '/')  # 关键：转义 |
+                return raw.replace('|', '/')
     return ""
 
 
