@@ -19,21 +19,27 @@ def notify_scan_complete(sector: str, b1_count: int, near_count: int, url: str =
     """
     发送飞书 Bot 消息通知扫描完成。
     """
-    text = f"知行B1扫描完成: {sector}  B1:{b1_count}  近B1:{near_count}"
-    if url:
-        text += f"\n{url}"
-
-    import os
+    import json as _json, os
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     lark_cli = os.path.expanduser(r"~\AppData\Roaming\npm\lark-cli.cmd")
+
+    # post 富文本：链接用 <tag:a> 显式声明，飞书一定渲染
+    content_blocks = [[{"tag": "text", "text": f"知行B1扫描完成: {sector}  B1:{b1_count}  近B1:{near_count}"}]]
+    if url:
+        content_blocks.append([{"tag": "a", "text": "查看报告", "href": url}])
+    content = _json.dumps({"zh_cn": {"content": content_blocks}}, ensure_ascii=False)
+
     r = subprocess.run(
         [lark_cli, "im", "+messages-send",
          "--user-id", FEISHU_BOT_USER_ID,
-         "--text", text,
+         "--msg-type", "post",
+         "--content", content,
          "--as", "bot"],
         capture_output=True, text=True, timeout=10,
         encoding="utf-8", errors="replace", env=env
     )
+    if r.stderr:
+        print(f"  [lark stderr] {r.stderr[:200]}")
     return '"ok": true' in (r.stdout or "")
 

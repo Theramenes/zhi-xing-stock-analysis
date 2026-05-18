@@ -86,33 +86,26 @@ def parse_table(text):
 
 
 def create_table(doc_id, index, headers, rows, max_rows_per_call=15):
-    """通过 create_feishu_table 创建表格。大表自动拆分。"""
+    """通过 create_feishu_table 创建表格。大表自动拆分。返回创建的块数。"""
     col_size = len(headers)
-    if len(rows) <= max_rows_per_call:
-        return _create_table_chunk(doc_id, index, headers, rows, 0)
-
-    # 拆分成多个表: 第一个表含表头+前N行, 后续表用内联表头
     chunk_count = (len(rows) + max_rows_per_call - 1) // max_rows_per_call
-    print(f"    大表{len(rows)}行→{chunk_count}块")
-    current_index = index
+    if chunk_count > 1:
+        print(f"    大表{len(rows)}行→{chunk_count}块")
+
+    created = 0
     for ci in range(chunk_count):
         start = ci * max_rows_per_call
         end = min(start + max_rows_per_call, len(rows))
         chunk_rows = rows[start:end]
-        if ci == 0:
-            ok = _create_table_chunk(doc_id, current_index, headers, chunk_rows, 0)
+        if _create_table_chunk(doc_id, index + ci, headers, chunk_rows):
+            created += 1
         else:
-            # 后续块: 用原表头行做表头（保持列一致）
-            ok = _create_table_chunk(doc_id, current_index, headers, chunk_rows, 0)
-        if ok:
-            current_index += 1
-        else:
-            return False
+            return 0  # 有一块失败则全部放弃
         time.sleep(0.2)
-    return True
+    return created
 
 
-def _create_table_chunk(doc_id, index, headers, rows, row_offset):
+def _create_table_chunk(doc_id, index, headers, rows):
     """创建单个表格块"""
     col_size = len(headers)
     cells = []
@@ -233,8 +226,9 @@ def publish(md_text, doc_id=None, title="未命名文档"):
         if seg['type'] == 'table':
             headers, rows = seg['headers'], seg['rows']
             if headers and rows:
-                if create_table(doc_id, index, headers, rows):
-                    index += 1; ok += 1
+                n = create_table(doc_id, index, headers, rows)
+                if n > 0:
+                    index += n; ok += n
                 else:
                     fail += 1
             else:
