@@ -19,9 +19,9 @@ def notify_scan_complete(sector: str, b1_count: int, near_count: int, url: str =
     """
     发送飞书 Bot 消息通知扫描完成。
     """
-    markdown = f"知行B1扫描完成: {sector}\nB1信号: {b1_count}  近B1: {near_count}"
+    text = f"知行B1扫描完成: {sector}  B1:{b1_count}  近B1:{near_count}"
     if url:
-        markdown += f"\n[{sector}B1扫描报告]({url})"
+        text += f"\n{url}"
 
     import os
     env = os.environ.copy()
@@ -30,7 +30,7 @@ def notify_scan_complete(sector: str, b1_count: int, near_count: int, url: str =
     r = subprocess.run(
         [lark_cli, "im", "+messages-send",
          "--user-id", FEISHU_BOT_USER_ID,
-         "--markdown", markdown,
+         "--text", text,
          "--as", "bot"],
         capture_output=True, text=True, timeout=10,
         encoding="utf-8", errors="replace", env=env
