@@ -52,18 +52,25 @@ class IFindClient(DataSource):
         except Exception as e:
             return {"error": str(e)}
 
-    def _http(self, endpoint: str, payload: dict, timeout: int = 15) -> Optional[dict]:
-        """直接 HTTP 调用 iFind REST API（备用，更快，绕过 CLI）"""
+    def _http(self, url_or_path: str, payload: dict = None, timeout: int = 15) -> Optional[dict]:
+        """
+        直接 HTTP 调用 iFind REST API。
+        - 传 path: 拼到 https://quantapi.51ifind.com/api/v1 后面
+        - 传完整 url: 直接用（如 snapshot 独立域名）
+        """
         import requests
-        from .config import config
-        token_path = os.path.join(os.path.dirname(config.ifind_cli or ""), "..", "..",
-                                   "tonghuashun-ifind-skill", "token_state.json")
+        if payload is None:
+            return {"error": "no payload"}
+
+        url = url_or_path if url_or_path.startswith("http") else \
+              f"https://quantapi.51ifind.com/api/v1{url_or_path}"
+
         token_path = os.path.expanduser("~/.openclaw/tonghuashun-ifind-skill/token_state.json")
         try:
             with open(token_path) as f:
                 token = json.load(f).get("access_token", "")
             resp = requests.post(
-                f"https://quantapi.51ifind.com/api/v1{endpoint}",
+                url,
                 headers={"Content-Type": "application/json", "access_token": token, "ifindlang": "cn"},
                 json=payload, timeout=timeout
             )
@@ -87,21 +94,22 @@ class IFindClient(DataSource):
         return self._get_kline_best(symbol, start_date, end_date)
 
     def _get_kline_best(self, symbol: str, start_date: str, end_date: str) -> DataResponse:
-        """双源 fallback: ① date_sequence → ② cmd_history_quotation"""
-        # 格式化代码
+        """四源 fallback: ① cmd_history → ② snap_shot → ③ date_sequence → ④ freeStockLine"""
         code = symbol if '.' in symbol else self._to_ifind_code(symbol)
 
-        # ① date_sequence（不耗历史配额）
-        resp = self._try_date_sequence(code, start_date, end_date)
-        if resp and resp.ok:
-            return resp
+        for name, method in [
+            ("history", lambda: self._try_history(code, start_date, end_date)),
+            ("snapshot", lambda: self._try_snapshot(code, start_date, end_date)),
+            ("date_sequence", lambda: self._try_date_sequence(code, start_date, end_date)),
+        ]:
+            resp = method()
+            if resp and resp.ok and resp.candles:
+                return resp
+            if resp and not resp.ok:
+                print(f"  [ifind] {name}: {resp.error[:60] if resp.error else 'no data'}")
 
-        # ② cmd_history_quotation（降级）
-        resp = self._try_history(code, start_date, end_date)
-        if resp and resp.ok:
-            return resp
-
-        return DataResponse(ok=False, error="所有K线数据源均失败", source=self.name)
+        # ④ freeStockLine 降级
+        return self._try_freestock(code, start_date, end_date)
 
     def _try_date_sequence(self, code: str, start_date: str, end_date: str) -> Optional[DataResponse]:
         """date_sequence 取 K 线 — 优先方案"""
@@ -182,6 +190,76 @@ class IFindClient(DataSource):
                 volume=vol / 100 if abs(vol) > 100000 else abs(vol),
             ))
         return DataResponse(ok=True, candles=candles, source=f"{self.name}/history")
+
+    # ============================================================
+    # ③ snap_shot (THS_SS) — 日快照，盘中/盘后 OHLCV
+    # ============================================================
+
+    def _try_snapshot(self, code: str, start_date: str, end_date: str) -> Optional[DataResponse]:
+        """
+        日快照端点：https://ft.10jqka.com.cn/api/v1/snap_shot
+        THS_SS('300083.SZ','open;high;low;latest;volume','','2026-05-18 15:00:00','2026-05-18 15:00:00')
+        返回盘中某时刻的快照数据，适合获取最新一日 OHLCV
+        """
+        from datetime import datetime
+        # 只对单日查询使用 snapshot（多日无法逐日快照）
+        try:
+            s = datetime.strptime(start_date, "%Y-%m-%d")
+            e = datetime.strptime(end_date, "%Y-%m-%d")
+        except ValueError:
+            return None
+
+        payload = {
+            "codes": code,
+            "indicators": "open;high;low;latest;volume",
+            "starttime": f"{start_date} 15:00:00",
+            "endtime": f"{end_date} 15:00:00",
+        }
+        # snapshot 用独立域名
+        data = self._http("https://ft.10jqka.com.cn/api/v1/snap_shot", payload)
+        if not data or data.get("errorcode") != 0:
+            return None
+
+        tables = data.get("tables", [])
+        if not tables:
+            return None
+
+        tb = tables[0].get("table", {})
+        times = tables[0].get("time", [])
+        if not times:
+            return DataResponse(ok=True, candles=[], source=f"{self.name}/snapshot")
+
+        opens = tb.get("open", [])
+        highs = tb.get("high", [])
+        lows = tb.get("low", [])
+        closes = tb.get("latest", [])  # snapshot 用 latest 非 close
+        vols = tb.get("volume", [])
+
+        candles = []
+        for i in range(len(times)):
+            vol = vols[i] if i < len(vols) else 0
+            candles.append(Candle(
+                date=str(times[i]),
+                open=opens[i] if i < len(opens) else 0,
+                high=highs[i] if i < len(highs) else 0,
+                low=lows[i] if i < len(lows) else 0,
+                close=closes[i] if i < len(closes) else 0,
+                volume=vol / 100 if abs(vol) > 100000 else abs(vol),
+            ))
+        return DataResponse(ok=True, candles=candles, source=f"{self.name}/snapshot")
+
+    # ============================================================
+    # ④ freeStockLine — 免费源兜底
+    # ============================================================
+
+    def _try_freestock(self, code: str, start_date: str, end_date: str) -> DataResponse:
+        """免费数据源降级"""
+        from .registry import registry
+        free = registry.get_source("free")
+        if free and free.is_available():
+            req = DataRequest(symbol=code.split('.')[0], days=120)
+            return free.get_kline(req)
+        return DataResponse(ok=False, error="所有数据源均失败", source="none")
 
     @staticmethod
     def _to_ifind_code(code: str) -> str:
