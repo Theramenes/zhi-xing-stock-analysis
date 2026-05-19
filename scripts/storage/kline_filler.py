@@ -51,25 +51,37 @@ def ensure_candles(code: str, required_days: int = 114) -> List[dict]:
 
     print(f"  [filler] {code}: DB有{len(candles)}天, 补最近{len(missing)}天...")
 
-    # 3. 四源降级补缺（按日期分组，减少 API 调用）
+    # 3. 补缺：优先逐日 snapshot（交易日历倒推），失败则 date_sequence 批量
     import time as _time
     from data_source.ifind_client import IFindClient
-    from data_source.config import config
 
     client = IFindClient()
     filled = 0
 
-    # 合并连续日期为一次请求
-    batches = _batch_dates(missing)
-    for start_d, end_d in batches:
-        resp = client.get_kline_range(code, start_d, end_d)
-        if resp.ok and resp.candles:
+    # 先试 snapshot 逐日补（THS_SS，单日 15:00:00）
+    for d in missing:
+        resp = client._try_snapshot(code, d)
+        if resp and resp.candles:
             rows = [{"date": c.date, "open": c.open, "high": c.high,
                      "low": c.low, "close": c.close, "volume": c.volume}
                     for c in resp.candles]
-            n = db.upsert_candles(code, rows)
-            filled += n
-        _time.sleep(0.3)  # 避免打爆 API
+            db.upsert_candles(code, rows)
+            filled += len(rows)
+        _time.sleep(0.15)
+
+    # snapshot 搞不定的批量走 date_sequence
+    still_missing = db.get_missing_dates(code, trading_days)
+    if still_missing:
+        batches = _batch_dates(still_missing)
+        for start_d, end_d in batches:
+            resp = client.get_kline_range(code, start_d, end_d)
+            if resp.ok and resp.candles:
+                rows = [{"date": c.date, "open": c.open, "high": c.high,
+                         "low": c.low, "close": c.close, "volume": c.volume}
+                        for c in resp.candles]
+                db.upsert_candles(code, rows)
+                filled += len(rows)
+            _time.sleep(0.3)
     if filled:
         print(f"  [filler] {code}: 补缺 {filled} 条")
 

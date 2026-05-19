@@ -239,7 +239,53 @@ class IFindClient(DataSource):
         return DataResponse(ok=True, candles=candles, source=f"{self.name}/snapshot")
 
     # ============================================================
-    # ④ freeStockLine — 免费源兜底
+    # ④ THS_RQ — 实时行情快照（当日盘中/盘后 OHLCV）
+    # ============================================================
+
+    def get_realtime_ohlcv(self, code: str) -> Optional[DataResponse]:
+        """
+        THS_RQ 实时行情 → 当日 OHLCV。
+        指标用逗号分隔（与 quote-history 一致）。
+        """
+        payload = {
+            "codes": code,
+            "indicators": "open,high,low,latest,volume,changeRatio,preClose,turnoverRatio,volumeRatio",
+        }
+        data = self._http("/real_time_quotation", payload)
+        if not data or data.get("errorcode") != 0:
+            return None
+
+        tables = data.get("tables", [])
+        if not tables:
+            return None
+
+        tb = tables[0].get("table", {})
+        times = tables[0].get("time", [])
+        if not times:
+            return None
+
+        opens = tb.get("open", [])
+        highs = tb.get("high", [])
+        lows = tb.get("low", [])
+        closes = tb.get("latest", [])
+        vols = tb.get("volume", [])
+
+        candles = []
+        for i in range(len(times)):
+            vol = vols[i] if i < len(vols) else 0
+            date_str = str(times[i])[:10] if times else ''
+            candles.append(Candle(
+                date=date_str,
+                open=opens[i] if i < len(opens) else 0,
+                high=highs[i] if i < len(highs) else 0,
+                low=lows[i] if i < len(lows) else 0,
+                close=closes[i] if i < len(closes) else 0,
+                volume=vol / 100 if abs(vol) > 100000 else abs(vol),
+            ))
+        return DataResponse(ok=True, candles=candles, source=f"{self.name}/thrsq")
+
+    # ============================================================
+    # ⑤ freeStockLine — 免费源兜底
     # ============================================================
 
     def _try_freestock(self, code: str, start_date: str, end_date: str) -> DataResponse:
