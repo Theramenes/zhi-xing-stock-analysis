@@ -56,11 +56,12 @@ def ensure_candles(code: str, required_days: int = 114) -> List[dict]:
     from data_source.ifind_client import IFindClient
 
     client = IFindClient()
+    ifnd_code = IFindClient._to_ifind_code(code)
     filled = 0
 
     # 先试 snapshot 逐日补（THS_SS，单日 15:00:00）
     for d in missing:
-        resp = client._try_snapshot(code, d)
+        resp = client._try_snapshot(ifnd_code, d)
         if resp and resp.candles:
             rows = [{"date": c.date, "open": c.open, "high": c.high,
                      "low": c.low, "close": c.close, "volume": c.volume}

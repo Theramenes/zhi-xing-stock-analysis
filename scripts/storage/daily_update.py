@@ -21,10 +21,12 @@ def daily_update(code: str, required_days: int = 114):
     ① 更新交易日历
     ② today → THS_RQ
     ③ yesterday → snapshot 逐日
-    ④ 缺口 → date_sequence 批量
+    ④ 缺口 → date_sequence 批量兜底
     """
     db = get_db()
     client = IFindClient()
+    # snapshot 需要 .SZ/.SH 后缀
+    ifnd_code = IFindClient._to_ifind_code(code)
     today_str = datetime.now().strftime("%Y-%m-%d")
 
     # ① 交易日历
@@ -32,7 +34,7 @@ def daily_update(code: str, required_days: int = 114):
 
     # ② today: THS_RQ 实时行情
     print(f"  [{code}] today: THS_RQ...", end=" ")
-    resp = client.get_realtime_ohlcv(code)
+    resp = client.get_realtime_ohlcv(ifnd_code)
     if resp and resp.candles:
         rows = [{"date": c.date, "open": c.open, "high": c.high,
                  "low": c.low, "close": c.close, "volume": c.volume}
@@ -56,7 +58,7 @@ def daily_update(code: str, required_days: int = 114):
         print(f"  [{code}] snapshot 补 {len(missing)} 天...", end=" ")
         filled = 0
         for d in missing:
-            resp = client._try_snapshot(code, d)
+            resp = client._try_snapshot(ifnd_code, d)
             if resp and resp.candles:
                 rows = [{"date": c.date, "open": c.open, "high": c.high,
                          "low": c.low, "close": c.close, "volume": c.volume}
