@@ -146,7 +146,7 @@ class IFindClient(DataSource):
                 high=tb["ths_high_price_stock"][i],
                 low=tb["ths_low_stock"][i],
                 close=tb["ths_close_price_stock"][i],
-                volume=vol / 100 if abs(vol) > 100000 else abs(vol),
+                volume=abs(vol) / 100 if (vol and abs(vol) > 100000) else (abs(vol) if vol else 0),
             ))
         return DataResponse(ok=True, candles=candles, source=f"{self.name}/ds")
 
