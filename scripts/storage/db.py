@@ -31,6 +31,205 @@ CREATE INDEX IF NOT EXISTS idx_code_date ON stock_daily(code, date);
 CREATE TABLE IF NOT EXISTS trading_calendar (
     date TEXT PRIMARY KEY
 );
+
+-- ============================================================
+-- 持仓账务
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS position (
+    code            TEXT PRIMARY KEY,
+    name            TEXT,
+    avg_cost        REAL,                -- 加权平均成本价
+    total_qty       INTEGER,             -- 当前总股数
+    available_qty   INTEGER,             -- 可用股数
+    first_buy_date  TEXT,                -- 首次买入日期
+    last_trade_date TEXT,                -- 最后交易日期
+    strategy        TEXT,                -- 长线/短线/波段/套利
+    notes           TEXT,                -- 备注
+    stop_loss       REAL,                -- 止损价
+    target_price    REAL,                -- 目标价
+    updated_at      TEXT                 -- 最后更新时间
+);
+
+CREATE TABLE IF NOT EXISTS trade_record (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    code          TEXT NOT NULL,
+    name          TEXT,
+    trade_date    TEXT NOT NULL,          -- YYYY-MM-DD
+    direction     TEXT NOT NULL,          -- buy / sell / t_buy / t_sell / clear
+    qty           INTEGER NOT NULL,
+    price         REAL NOT NULL,
+    amount        REAL,                   -- qty * price
+    fee           REAL DEFAULT 0,
+    pnl           REAL,                   -- 实现盈亏（卖出时计算）
+    pnl_pct       REAL,                   -- 实现盈亏比例
+    balance_qty   INTEGER,                -- 交易后持仓余量
+    avg_cost_after REAL,                  -- 交易后成本
+    reason        TEXT,                   -- 交易理由
+    memo          TEXT,                   -- 补充说明
+    created_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tx_code ON trade_record(code);
+CREATE INDEX IF NOT EXISTS idx_tx_date ON trade_record(trade_date);
+
+CREATE TABLE IF NOT EXISTS position_snapshot (
+    date          TEXT NOT NULL,
+    code          TEXT NOT NULL,
+    name          TEXT,
+    qty           INTEGER,
+    avg_cost      REAL,
+    close_price   REAL,                   -- 当日收盘价
+    market_value  REAL,                   -- 市值
+    unrealized_pnl REAL,                  -- 浮动盈亏
+    unrealized_pnl_pct REAL,              -- 浮动盈亏比例
+    indicators    TEXT,                   -- JSON: 指标快照
+    PRIMARY KEY (date, code)
+);
+
+-- ============================================================
+-- 关注列表
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS watchlist (
+    code          TEXT PRIMARY KEY,
+    name          TEXT,
+    source        TEXT DEFAULT 'manual',  -- manual / auto_scan / recommend
+    reason        TEXT,
+    priority      INTEGER DEFAULT 3,      -- 1-5, 1=最高
+    tags          TEXT,                   -- JSON: ["锂电池","B1观察"]
+    status        TEXT DEFAULT 'active',  -- active / observing / archived
+    added_date    TEXT,
+    added_price   REAL,
+    notes         TEXT,
+    archived_date TEXT,
+    archived_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_wl_status ON watchlist(status);
+
+CREATE TABLE IF NOT EXISTS watchlist_daily (
+    date          TEXT NOT NULL,
+    code          TEXT NOT NULL,
+    close         REAL,
+    change_pct    REAL,
+    J             REAL,
+    RSI           REAL,
+    趋势          TEXT,
+    白线          REAL,
+    黄线          REAL,
+    评分          INTEGER,
+    B1_active     INTEGER DEFAULT 0,      -- 0/1
+    near_B1       INTEGER DEFAULT 0,      -- J<20
+    signals       TEXT,                   -- JSON: 信号列表
+    超缩量        INTEGER DEFAULT 0,
+    洗盘异动      INTEGER DEFAULT 0,
+    status_change TEXT,                   -- new_B1 / J_dropped / trend_bear / improved / worsened / ''
+    PRIMARY KEY (date, code)
+);
+CREATE INDEX IF NOT EXISTS idx_wld_code ON watchlist_daily(code, date);
+
+-- ============================================================
+-- B1 追踪
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS b1_scan (
+    scan_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_date     TEXT,
+    scan_type     TEXT,                   -- sector / market / holdings
+    sector_name   TEXT,
+    total_scanned INTEGER,
+    b1_count      INTEGER,
+    near_b1_count INTEGER,
+    report_path   TEXT,
+    feishu_url    TEXT,
+    elapsed_sec   REAL,
+    created_at    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS b1_candidate (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_id       INTEGER NOT NULL,
+    code          TEXT NOT NULL,
+    name          TEXT,
+    sector        TEXT,
+    scan_date     TEXT,
+    category      TEXT,                   -- B1 / near_B1 / trend_hold / suo_bao
+    close         REAL,
+    change_pct    REAL,
+    J             REAL,
+    趋势          TEXT,
+    评分          INTEGER,
+    signals       TEXT,                   -- JSON
+    单针下20      INTEGER DEFAULT 0,
+    超缩量        INTEGER DEFAULT 0,
+    距离白线_pct  REAL,
+    距离黄线_pct  REAL,
+    FOREIGN KEY (scan_id) REFERENCES b1_scan(scan_id)
+);
+CREATE INDEX IF NOT EXISTS idx_b1c_code ON b1_candidate(code, scan_date);
+CREATE INDEX IF NOT EXISTS idx_b1c_scan ON b1_candidate(scan_id);
+
+CREATE TABLE IF NOT EXISTS b1_tracking (
+    code          TEXT NOT NULL,
+    date          TEXT NOT NULL,
+    stage         TEXT DEFAULT 'watching', -- watching / near_b1 / b1 / observing / bought / holding / sell_candidate / sold / archived
+    J             REAL,
+    close         REAL,
+    signals       TEXT,
+    trend         TEXT,
+    score         INTEGER,
+    stage_days    INTEGER DEFAULT 0,      -- 当前stage持续天数
+    action        TEXT,                   -- 关注 / 建仓 / 加仓 / 减仓 / 清仓 / 移出观察
+    action_price  REAL,
+    memo          TEXT,
+    PRIMARY KEY (code, date)
+);
+
+-- ============================================================
+-- 重点板块
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS focus_sector (
+    name          TEXT PRIMARY KEY,
+    sector_type   TEXT DEFAULT 'industry', -- industry / concept
+    source        TEXT DEFAULT 'manual',   -- manual / scan_result
+    priority      INTEGER DEFAULT 3,
+    b1_density    REAL,                   -- B1数量/成分股数量
+    notes         TEXT,
+    tags          TEXT,                   -- JSON
+    added_date    TEXT,
+    last_scan_date TEXT,
+    last_b1_count INTEGER,
+    status        TEXT DEFAULT 'active'    -- active / archived
+);
+
+CREATE TABLE IF NOT EXISTS focus_sector_daily (
+    date          TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    change_pct    REAL,
+    flow_in       REAL,                   -- 资金净流入（亿）
+    leading_stock TEXT,
+    b1_count      INTEGER,
+    near_b1_count INTEGER,
+    avg_score     REAL,
+    hot_rank      INTEGER,
+    PRIMARY KEY (date, name)
+);
+
+-- ============================================================
+-- 审计日志
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    table_name  TEXT NOT NULL,
+    record_id   TEXT,
+    action      TEXT NOT NULL,            -- INSERT / UPDATE / DELETE / ARCHIVE
+    old_value   TEXT,                     -- JSON
+    new_value   TEXT,                     -- JSON
+    reason      TEXT,
+    operator    TEXT DEFAULT 'system',    -- system / user
+    created_at  TEXT
+);
 """
 
 

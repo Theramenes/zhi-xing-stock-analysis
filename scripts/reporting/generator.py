@@ -231,3 +231,134 @@ def save_raw_data(data, path):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2, default=str)
     return os.path.abspath(path)
+
+
+# ============================================================
+# Phase C: 持仓报告 + 日终追踪报告
+# ============================================================
+
+def generate_holdings_report(positions: list, daily_data: dict = None) -> str:
+    """生成持仓概览 Markdown 报告"""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines = []
+    L = lines.append
+    L(f"# 持仓概览报告")
+    L(f"> {now}  {len(positions)}只持仓")
+    L("")
+
+    L("| 代码 | 名称 | 成本 | 数量 | 现价 | 市值 | 浮动盈亏 | 浮动盈亏% | 策略 | B1状态 |")
+    L("|------|------|------|------|------|------|----------|-----------|------|--------|")
+    total_mv = 0
+    total_pnl = 0
+    for p in positions:
+        code = p.get("code", "")
+        name = p.get("name", "")
+        cost = p.get("avg_cost", 0) or 0
+        qty = p.get("total_qty", 0) or 0
+        strategy = p.get("strategy", "") or ""
+        mv = 0
+        pnl = 0
+        pnl_pct = 0
+        close = 0
+        b1_status = "—"
+
+        if daily_data and code in daily_data:
+            ind = daily_data[code]
+            close = ind.get("last", 0) or 0
+            mv = round(qty * close, 2)
+            pnl = round(qty * (close - cost), 2)
+            pnl_pct = round((close - cost) / cost * 100, 2) if cost else 0
+            sigs = ind.get("信号", [])
+            if sigs:
+                b1_status = "+".join(sigs[:2])
+            elif ind.get("J", 999) < 20:
+                b1_status = "近B1"
+            else:
+                b1_status = ind.get("趋势", "")
+
+        total_mv += mv
+        total_pnl += pnl
+        L(f"| {code} | {name[:8]} | {cost:.2f} | {qty} | {close:.2f} | {mv:.0f} | {pnl:+.0f} | {pnl_pct:+.1f}% | {strategy} | {b1_status} |")
+
+    L("")
+    L(f"**总市值**: {total_mv:,.0f}  **总浮动盈亏**: {total_pnl:+,.0f}")
+    L("")
+    return "\n".join(lines)
+
+
+def generate_daily_review_md(summary: dict) -> str:
+    """生成日终追踪 Markdown 日报"""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines = []
+    L = lines.append
+    L(f"# 知行日终追踪报告")
+    L(f"> {summary.get('date', '')}  {now}")
+    L(f"> 关注票: {summary.get('watchlist_scanned',0)}  持仓快照: {summary.get('positions_snapshotted',0)}")
+    L("")
+
+    new_b1 = summary.get("new_b1", [])
+    if new_b1:
+        L(f"## 新B1信号 ({len(new_b1)}只)")
+        L("")
+        L("| 代码 | 名称 | J | 评分 | 趋势 | 信号 |")
+        L("|------|------|---|------|------|------|")
+        for b in new_b1:
+            L(f"| {b['code']} | {b.get('name','')[:8]} | {b.get('J','?')} | {b.get('score','?')} | {b.get('trend','')} | {'+'.join(b.get('signals',[])[:2])} |")
+        L("")
+
+    b1_lost = summary.get("b1_lost", [])
+    if b1_lost:
+        L(f"## B1消失 ({len(b1_lost)}只) → 进入观察期")
+        L("")
+        for b in b1_lost:
+            L(f"- {b['code']} {b.get('name','')}: J={b.get('J','?')} ({b.get('from_stage','')}→observing)")
+        L("")
+
+    near_b1 = summary.get("near_b1", [])
+    if near_b1:
+        L(f"## 近B1观察区 ({len(near_b1)}只, J<20)")
+        L("")
+        for b in near_b1:
+            L(f"- {b['code']} {b.get('name','')}: J={b.get('J','?')} 评分={b.get('score','?')}")
+        L("")
+
+    stage_changes = summary.get("stage_changes", [])
+    if stage_changes:
+        L(f"## 状态变更 ({len(stage_changes)}条)")
+        L("")
+        L("| 代码 | 原状态 | 新状态 |")
+        L("|------|--------|--------|")
+        for c in stage_changes:
+            L(f"| {c.get('code','')} | {c.get('from','')} | {c.get('to','')} |")
+        L("")
+
+    expired = summary.get("expired_cleaned", [])
+    if expired:
+        L(f"## 过期清理 ({len(expired)}只, 7天观察期满)")
+        L("")
+        for code in expired:
+            L(f"- {code} → archived")
+        L("")
+
+    alerts = summary.get("alerts", [])
+    if alerts:
+        L(f"## 预警 ({len(alerts)}条)")
+        L("")
+        for a in alerts:
+            L(f"- [{a.get('type','')}] {a.get('code','')} {a.get('name','')}: {a.get('detail','')}")
+            if a.get("changes"):
+                L(f"  - 变化: {', '.join(a['changes'])}")
+        L("")
+
+    errors = summary.get("errors", [])
+    if errors:
+        L(f"## 错误 ({len(errors)}条)")
+        L("")
+        for e in errors:
+            L(f"- {e}")
+        L("")
+
+    L("---")
+    L(f"*知行系统 {now}  仅供参考，不构成投资建议*")
+    return "\n".join(lines)
+
