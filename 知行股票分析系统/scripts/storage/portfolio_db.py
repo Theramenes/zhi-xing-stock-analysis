@@ -538,6 +538,41 @@ def record_focus_daily(name: str, change_pct: float = None, flow_in: float = Non
 # 审计日志
 # ============================================================
 
+# ============================================================
+# 账户快照
+# ============================================================
+
+def save_account_snapshot(total_asset: float, available_cash: float, stock_value: float,
+                          position_ratio: float = 0, total_pnl: float = 0, total_pnl_pct: float = 0) -> bool:
+    db = _ensure_db()
+    date = datetime.now().strftime("%Y-%m-%d")
+    try:
+        db.conn.execute(
+            """INSERT OR REPLACE INTO account_snapshot
+               (date, total_asset, available_cash, stock_value, position_ratio, total_pnl, total_pnl_pct, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (date, total_asset, available_cash, stock_value, position_ratio, total_pnl, total_pnl_pct, _now_ts())
+        )
+        db.conn.commit()
+        return True
+    except Exception:
+        return False
+
+
+def get_latest_account() -> dict | None:
+    db = _ensure_db()
+    row = db.conn.execute(
+        "SELECT date, total_asset, available_cash, stock_value, position_ratio, total_pnl, total_pnl_pct "
+        "FROM account_snapshot ORDER BY date DESC LIMIT 1"
+    ).fetchone()
+    if row:
+        return {
+            "date": row[0], "total_asset": row[1], "available_cash": row[2],
+            "stock_value": row[3], "position_ratio": row[4], "total_pnl": row[5], "total_pnl_pct": row[6],
+        }
+    return None
+
+
 def _audit(table: str, record_id: str, action: str, old_val: Any = None,
            new_val: Any = None, reason: str = "", operator: str = "system"):
     db = _ensure_db()

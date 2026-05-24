@@ -652,6 +652,16 @@ def cmd_watchlist_report(args):
         print("LLM 调用失败。")
 
 
+def cmd_account_update(args):
+    """更新账户快照"""
+    from storage.portfolio_db import save_account_snapshot
+    stock_value = args.total - args.cash
+    ratio = args.position_ratio or (stock_value / args.total * 100)
+    pnl = args.pnl or 0
+    save_account_snapshot(args.total, args.cash, stock_value, ratio, pnl)
+    print(f"账户快照已保存: 总资产={args.total:.2f} 可用={args.cash:.2f} 仓位={ratio:.1f}% 盈亏={pnl:+.2f}")
+
+
 def cmd_trade_diagnosis(args):
     """交易诊断"""
     from config.llm_config import get_llm_config
@@ -983,6 +993,13 @@ def main():
     p_td.add_argument("--shares", type=int, required=True, help="计划数量")
     p_td.add_argument("--days", type=int, default=114, help="K线天数")
 
+    # === 账户管理 ===
+    p_as = sub.add_parser("account-update", help="更新账户快照（总资产/可用资金/仓位）")
+    p_as.add_argument("--total", type=float, required=True, help="总资产")
+    p_as.add_argument("--cash", type=float, required=True, help="可用资金")
+    p_as.add_argument("--position-ratio", type=float, help="仓位%")
+    p_as.add_argument("--pnl", type=float, help="总持仓盈亏")
+
     # === Phase G: 数据报告 ===
     p_dr = sub.add_parser("data-report", help="个股完整数据报告（B1+基本面+估值+消息+板块+市场）")
     p_dr.add_argument("--symbol", "-s", required=True, help="股票代码")
@@ -1064,6 +1081,10 @@ def main():
         cmd_watchlist_report(args)
     elif args.command == "trade-diagnosis":
         cmd_trade_diagnosis(args)
+
+    # === 账户管理 ===
+    elif args.command == "account-update":
+        cmd_account_update(args)
 
     # === Phase G: 数据报告 ===
     elif args.command == "data-report":

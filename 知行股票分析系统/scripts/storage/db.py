@@ -72,6 +72,21 @@ CREATE TABLE IF NOT EXISTS trade_record (
 CREATE INDEX IF NOT EXISTS idx_tx_code ON trade_record(code);
 CREATE INDEX IF NOT EXISTS idx_tx_date ON trade_record(trade_date);
 
+-- ============================================================
+-- 账户快照
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS account_snapshot (
+    date              TEXT PRIMARY KEY,
+    total_asset       REAL,                -- 总资产
+    available_cash    REAL,                -- 可用资金
+    stock_value       REAL,                -- 股票市值
+    position_ratio    REAL,                -- 仓位 (%)
+    total_pnl         REAL,                -- 总盈亏
+    total_pnl_pct     REAL,                -- 总盈亏比例
+    created_at        TEXT
+);
+
 CREATE TABLE IF NOT EXISTS position_snapshot (
     date          TEXT NOT NULL,
     code          TEXT NOT NULL,
