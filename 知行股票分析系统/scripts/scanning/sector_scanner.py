@@ -22,7 +22,6 @@ from data_source.base import DataRequest, StockInfo
 from data_source.sector_registry import fuzzy_match_sectors
 from indicators.b1_calculator import compute_single
 from indicators.suo_bao_b1 import scan as suo_bao_scan
-from .cache_manager import CacheManager
 from .industry_analyzer import (
     IndustryAnalyzer, StockOverview, SubIndustry,
     parse_stock_overview_from_ifind,
@@ -208,7 +207,7 @@ class SectorB1Scanner:
 
     def __init__(self, workers: int = 20, use_cache: bool = True):
         self.workers = workers
-        self.cache = CacheManager() if use_cache else None
+        # scan_cache JSON 已弃用，数据统一走 SQLite（stock_daily/watchlist_daily/b1_candidate）
         from config.blacklist import blacklist as bl
         self.blacklist = bl
 
@@ -325,8 +324,6 @@ class SectorB1Scanner:
                 suo_bao=suo if suo.get("ok") else None,
             )
             stocks.append(sr)
-            if self.cache:
-                self.cache.save(m.code, candles, b1)
             if (i+1) % 100 == 0:
                 print(f"  {i+1}/{len(members)}", end="\r")
 

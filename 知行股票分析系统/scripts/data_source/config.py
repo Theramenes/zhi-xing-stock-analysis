@@ -42,7 +42,7 @@ class DataSourceConfig:
         )
         # 本地路径: workspace 下的 ifind-skill clone
         _local_ifind = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
             "..", "ifind-skill", "tonghuashun-ifind-skill", "scripts", "ifind_cli.py"
         )
         _oc_ifind = os.path.expanduser(
@@ -61,7 +61,7 @@ class DataSourceConfig:
             ) if self.is_openclaw else _resolve_python()
         )
         _local_free = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
             "..", "freestock-skill", "freestocklineskill", "scripts", "stockline_cli.py"
         )
         _oc_free = os.path.expanduser(

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "zhi-xing-stock"
+version = "0.3.0"
+description = "知行股票分析系统 — 基于知行超级B1、单针下20、知行趋势线的 A 股量化分析 CLI 工具。"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0,<9.0.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = [
+    "知行股票分析系统/scripts",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "知行股票分析系统/scripts",
+]
+
+[tool.uv]
+default-groups = ["dev"]

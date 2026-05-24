@@ -230,6 +230,25 @@ CREATE TABLE IF NOT EXISTS audit_log (
     operator    TEXT DEFAULT 'system',    -- system / user
     created_at  TEXT
 );
+
+-- ============================================================
+-- LLM 报告缓存
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS llm_report (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    code          TEXT,                     -- 股票代码（板块/持仓报告为空）
+    report_type   TEXT NOT NULL,            -- stock / sector / holdings / watchlist / trade
+    query_date    TEXT,
+    prompt_hash   TEXT,                     -- input JSON hash，用于缓存去重
+    raw_input     TEXT,                     -- JSON（输入数据摘要，max 8000）
+    content       TEXT,                     -- LLM 生成的 Markdown
+    model         TEXT,
+    tokens_in     INTEGER DEFAULT 0,
+    tokens_out    INTEGER DEFAULT 0,
+    elapsed_sec   REAL,
+    created_at    TEXT
+);
 """
 
 
@@ -359,15 +378,16 @@ class StockDB:
                 return 0
 
             days = tables[0].get("time", [])
-            count = 0
+            before = self.conn.total_changes
             with self.conn:
                 for d in days:
                     self.conn.execute(
                         "INSERT OR IGNORE INTO trading_calendar (date) VALUES (?)", (d[:10],)
                     )
-                    count += 1
-            print(f"  [calendar] 新增 {count} 个交易日")
-            return count
+            added = self.conn.total_changes - before
+            if added:
+                print(f"  [calendar] 新增 {added} 个交易日 (共 {len(days)} 天)")
+            return added
 
     def get_trading_days(self, start: str, end: str) -> List[str]:
         """从本地缓存取交易日列表"""

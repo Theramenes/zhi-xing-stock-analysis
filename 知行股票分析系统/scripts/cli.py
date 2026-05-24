@@ -426,6 +426,416 @@ def cmd_focus_sector_list(args):
               f"B1密度={s.get('b1_density','?')} 状态={s.get('status','')}")
 
 
+# ============================================================
+# Phase F: LLM 报告解析
+# ============================================================
+
+def cmd_llm_stock(args):
+    """个股AI技术解读（可选 --sector 触发三层深度分析）"""
+    from config.llm_config import get_llm_config
+    config = get_llm_config()
+    if not config.available:
+        print("LLM 未配置，跳过 AI 解读。请设置 ZX_LLM_API_KEY 环境变量。")
+        return
+
+    from storage.kline_filler import ensure_candles
+    from indicators.b1_calculator import compute_single
+    from llm.enhancer import enhance_stock_report, enhance_stock_deep
+    from llm.market_context import build_sector_context
+
+    print(f"[LLM Stock] 拉取 {args.symbol} K线...")
+    candles = ensure_candles(args.symbol, required_days=args.days)
+    if len(candles) < 30:
+        print(f"K线不足（{len(candles)}天），无法分析")
+        return
+
+    print(f"[LLM Stock] 计算指标...")
+    result = compute_single(args.symbol, candles)
+    if "error" in result:
+        print(f"指标计算失败: {result['error']}")
+        return
+
+    name = result.get("name", args.symbol)
+
+    if args.sector:
+        # 深度分析：三层（个股 + 板块定位 + 大局研判）
+        print(f"[LLM Stock] 拉取板块 '{args.sector}' 上下文 + 横向对比...")
+        sector_ctx = build_sector_context(args.sector, args.symbol)
+        if sector_ctx:
+            print(f"  板块排名: {sector_ctx.get('rank','?')}")
+            print(f"  同行对比: {len(sector_ctx.get('top_peers',[]))} 只可对比")
+            print(f"  市场环境: {sector_ctx.get('market_context',{}).get('top_sectors','?')}")
+        else:
+            print(f"  板块数据获取失败，仅做个股分析")
+        print(f"[LLM Stock] AI 深度分析中（三层逻辑）...")
+        md = enhance_stock_deep(args.symbol, name, result, sector_ctx)
+    else:
+        print(f"[LLM Stock] AI 解读中...")
+        md = enhance_stock_report(args.symbol, name, result)
+
+    if md:
+        print(md)
+    else:
+        print("LLM 调用失败，请检查 API Key 和网络连接。")
+
+
+def cmd_llm_sector(args):
+    """板块扫描 + AI叙事增强"""
+    from config.llm_config import get_llm_config
+    config = get_llm_config()
+    if not config.available:
+        print("LLM 未配置，跳过 AI 解读。请设置 ZX_LLM_API_KEY 环境变量。")
+
+    from scanning.sector_scanner import SectorB1Scanner
+    from llm.enhancer import enhance_sector_report
+
+    scanner = SectorB1Scanner(workers=args.workers)
+    combined = scanner.scan(args.name, days=args.days)
+    b1 = combined.get("b1")
+    if not b1 or not b1.stocks:
+        print("扫描无结果")
+        return
+
+    if config.available:
+        print("[LLM Sector] AI 叙事分析中...")
+        md = enhance_sector_report(args.name, {
+            "stocks": [s.to_dict() if hasattr(s, 'to_dict') else s for s in b1.stocks],
+            "b1_stocks": [s.to_dict() if hasattr(s, 'to_dict') else s for s in b1.b1_stocks],
+            "near_b1_stocks": [s.to_dict() if hasattr(s, 'to_dict') else s for s in b1.near_b1_stocks],
+        })
+        if md:
+            print(md)
+
+
+def cmd_holdings_letter(args):
+    """持仓日报"""
+    from config.llm_config import get_llm_config
+    config = get_llm_config()
+    if not config.available:
+        print("LLM 未配置，请设置 ZX_LLM_API_KEY 环境变量。")
+        return
+
+    from storage.db import get_db
+    from datetime import datetime, timedelta
+    from storage.kline_filler import ensure_candles
+    from indicators.b1_calculator import compute_single
+    from llm.enhancer import generate_holdings_letter
+
+    db = get_db()
+    rows = db.conn.execute(
+        "SELECT code, name, total_qty, avg_cost FROM position WHERE total_qty > 0"
+    ).fetchall()
+
+    if not rows:
+        print("暂无持仓")
+        return
+
+    holdings_data = []
+    print(f"[Holdings Letter] 拉取 {len(rows)} 只持仓 K线...")
+    for code, name, qty, cost in rows:
+        candles = ensure_candles(code, required_days=114)
+        if len(candles) < 30:
+            print(f"  {code} {name}: K线不足，跳过")
+            continue
+        ind = compute_single(code, candles)
+        holdings_data.append({
+            "code": code, "name": name, "qty": qty, "cost": cost,
+            "last": ind.get("last", 0), "change_pct": ind.get("change_pct", 0),
+            "J": ind.get("J"), "RSI": ind.get("RSI"), "趋势": ind.get("趋势"),
+            "评分": ind.get("评分"), "信号": ind.get("信号", []),
+            "B1_active": bool(ind.get("信号") or ind.get("基础B1")),
+            "near_B1": ind.get("J", 999) < 20,
+            "超缩量": ind.get("超缩量", False),
+            "status_change": "",
+        })
+        print(f"  {code} {name}: J={ind.get('J')} 评分={ind.get('评分')}")
+
+    if not holdings_data:
+        print("无有效持仓数据")
+        return
+
+    print("[Holdings Letter] AI 生成中...")
+    md = generate_holdings_letter(holdings_data)
+    if md:
+        if args.output:
+            with open(args.output, 'w', encoding='utf-8') as f:
+                f.write(md)
+            print(f"已保存到 {args.output}")
+        else:
+            print(md)
+    else:
+        print("LLM 调用失败。")
+
+
+def cmd_watchlist_report(args):
+    """关注列表监控报告"""
+    from config.llm_config import get_llm_config
+    config = get_llm_config()
+    if not config.available:
+        print("LLM 未配置，请设置 ZX_LLM_API_KEY 环境变量。")
+        return
+
+    from storage.db import get_db
+    from datetime import datetime, timedelta
+    from llm.enhancer import generate_watchlist_report
+
+    db = get_db()
+    today = datetime.now().strftime("%Y-%m-%d")
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # 获取今日活跃关注列表
+    active = db.conn.execute(
+        "SELECT code, name FROM watchlist WHERE status='active'"
+    ).fetchall()
+
+    if not active:
+        print("暂无活跃关注")
+        return
+
+    active_list = []
+    for code, name in active:
+        row = db.conn.execute(
+            "SELECT close, change_pct, J, 趋势, 评分, B1_active, near_B1, signals "
+            "FROM watchlist_daily WHERE code=? AND date=? ORDER BY date DESC LIMIT 1",
+            (code, today)
+        ).fetchone()
+        if row:
+            sigs = json.loads(row[7]) if row[7] else []
+            active_list.append({
+                "code": code, "name": name,
+                "close": row[0], "change_pct": row[1] or 0,
+                "J": row[2], "趋势": row[3], "评分": row[4],
+                "B1_active": bool(row[5]), "near_B1": bool(row[6]),
+                "信号": sigs,
+            })
+
+    # 获取今日变化
+    changes_rows = db.conn.execute(
+        "SELECT code, name, status_change FROM watchlist_daily "
+        "WHERE date=? AND status_change IS NOT NULL AND status_change != ''",
+        (today,)
+    ).fetchall()
+
+    changes = []
+    new_b1 = []
+    b1_lost = []
+    for code, name, sc_change in changes_rows:
+        if sc_change:
+            try:
+                change_data = json.loads(sc_change) if isinstance(sc_change, str) else sc_change
+                change_data["code"] = code
+                change_data["name"] = name
+                changes.append(change_data)
+            except Exception:
+                changes.append({"code": code, "name": name, "change": str(sc_change)})
+
+    watchlist_data = {
+        "date": today,
+        "active": active_list,
+        "changes": changes,
+        "new_B1": new_b1,
+        "b1_lost": b1_lost,
+        "near_b1_new": [],
+    }
+
+    print(f"[Watchlist Report] 活跃关注: {len(active_list)} 只，变化: {len(changes)} 项")
+    print("[Watchlist Report] AI 生成中...")
+    md = generate_watchlist_report(watchlist_data)
+    if md:
+        if args.output:
+            with open(args.output, 'w', encoding='utf-8') as f:
+                f.write(md)
+            print(f"已保存到 {args.output}")
+        else:
+            print(md)
+    else:
+        print("LLM 调用失败。")
+
+
+def cmd_trade_diagnosis(args):
+    """交易诊断"""
+    from config.llm_config import get_llm_config
+    config = get_llm_config()
+    if not config.available:
+        print("LLM 未配置，请设置 ZX_LLM_API_KEY 环境变量。")
+        return
+
+    from storage.kline_filler import ensure_candles
+    from indicators.b1_calculator import compute_single
+    from storage.db import get_db
+    from llm.enhancer import diagnose_trade
+
+    print(f"[Diagnosis] 拉取 {args.symbol} K线...")
+    candles = ensure_candles(args.symbol, required_days=args.days)
+    if len(candles) < 30:
+        print(f"K线不足（{len(candles)}天），无法分析")
+        return
+
+    result = compute_single(args.symbol, candles)
+    if "error" in result:
+        print(f"指标计算失败: {result['error']}")
+        return
+
+    name = args.name or result.get("name", args.symbol)
+
+    # 获取持仓上下文
+    holdings_ctx = ""
+    db = get_db()
+    pos = db.conn.execute(
+        "SELECT total_qty, avg_cost FROM position WHERE code=? AND total_qty > 0",
+        (args.symbol,)
+    ).fetchone()
+    if pos:
+        holdings_ctx = f"\n## 当前持仓\n- 持有 {pos[0]} 股\n- 成本价 {pos[1]}\n"
+
+    print(f"[Diagnosis] AI 诊断中...")
+    md = diagnose_trade(args.symbol, name, args.action, args.shares, result, holdings_ctx)
+    if md:
+        print(md)
+    else:
+        print("LLM 调用失败。")
+
+
+# ============================================================
+# Phase G: 数据报告
+# ============================================================
+
+def cmd_data_report(args):
+    """个股完整数据报告"""
+    from storage.kline_filler import ensure_candles
+    from indicators.b1_calculator import compute_single
+    from reporting.data_report import build_individual_report
+    from data_source.fundamental_cascade import (
+        get_fundamentals, get_valuation, get_news_and_reports,
+        get_chip, get_fund_flow, get_market_context,
+    )
+    from llm.market_context import build_sector_context, build_chain_context
+
+    print(f"[Data] 拉取 {args.symbol} K线 + B1指标...")
+    candles = ensure_candles(args.symbol, required_days=args.days)
+    if len(candles) < 30:
+        print(f"K线不足({len(candles)}天)，退出")
+        return
+
+    ind = compute_single(args.symbol, candles)
+    name = args.name or ind.get("name", args.symbol)
+
+    print("[Data] 基本面...")
+    fundamentals = get_fundamentals(args.symbol, name)
+    print(f"  源: {fundamentals.get('source','?')}")
+
+    print("[Data] 估值...")
+    valuation = get_valuation(args.symbol, name)
+
+    print("[Data] 消息面...")
+    news_data = get_news_and_reports(args.symbol)
+
+    print("[Data] 筹码+资金流...")
+    chip = get_chip(args.symbol)
+    ff = get_fund_flow(args.symbol)
+
+    print("[Data] 市场大局...")
+    market = get_market_context()
+
+    sector_ctx = None
+    if args.theme:
+        print(f"[Data] 产业链定位 ({args.theme})...")
+        sector_ctx = build_chain_context(args.theme, args.symbol)
+        if sector_ctx:
+            print(f"  链条= {sector_ctx['name']}, {sector_ctx['total']}只标的, B1密度={sector_ctx['b1_density']}")
+    elif args.sector:
+        print(f"[Data] 板块定位 ({args.sector})...")
+        sector_ctx = build_sector_context(args.sector, args.symbol)
+
+    print("[Data] 生成报告...")
+    md = build_individual_report(args.symbol, name, ind, fundamentals, valuation,
+                                 news_data, chip, ff, market, sector_ctx)
+    if args.output:
+        with open(args.output, 'w', encoding='utf-8') as f:
+            f.write(md)
+        print(f"已保存到 {args.output}")
+    else:
+        print(md)
+
+
+def cmd_sector_report(args):
+    """板块扫描数据报告"""
+    from scanning.sector_scanner import SectorOverview, SectorB1Scanner
+    from reporting.data_report import build_individual_report
+    from data_source.fundamental_cascade import get_market_context
+    from indicators.b1_calculator import compute_single
+    from storage.kline_filler import ensure_candles
+
+    print(f"[Sector] 概览 + B1扫描 '{args.name}'...")
+    scanner = SectorB1Scanner(workers=args.workers)
+    combined = scanner.scan(args.name, days=args.days)
+    ov = combined.get("overview")
+    b1 = combined.get("b1")
+    if not b1 or not b1.stocks:
+        print("无扫描结果")
+        return
+
+    print("[Sector] 市场大局...")
+    market = get_market_context()
+
+    # 生成报告头
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines = []
+    L = lines.append
+    L(f"# {args.name} 板块扫描报告")
+    L(f"> {now}  {ov.total_stocks if ov else '?'}只成分股  B1={len(b1.b1_stocks)} 近B1={len(b1.near_b1_stocks)} 趋势={len(b1.trend_hold_stocks)}")
+
+    # 市场大局
+    from reporting.data_report import _section_market
+    _section_market(lines, market)
+
+    # 重点标的表格：龙头 + B1 + 领涨 三列合表
+    L("## 重点标的")
+    L("")
+    L("| 名称代码 | 主导业务 | 板块地位 | 涨跌 | B1状态 | J值 | 评分 | 信号 |")
+    L("|----------|---------|---------|------|--------|-----|------|------|")
+    # 合并 ov 概览数据和 b1 指标
+    ov_map = {}
+    if ov:
+        for s in ov.stocks:
+            ov_map[getattr(s, 'code', '')] = s
+
+    for s in sorted(b1.stocks, key=lambda x: (len(getattr(x, '信号', []) or []), getattr(x, '评分', 0)), reverse=True)[:25]:
+        sig_str = "+".join(getattr(s, '信号', [])) or "—"
+        b1_status = "★B1" if (getattr(s, '信号', None) or getattr(s, '基础B1', None)) else ("近B1" if getattr(s, 'J', 99) < 20 else getattr(s, '趋势', ''))
+        ov_s = ov_map.get(s.code)
+        biz = _get_biz(s.code, ov, 30) if ov else ""
+        tag = ""
+        if ov_s:
+            if getattr(ov_s, 'leader_tag', ''): tag = f"🐉{ov_s.leader_tag[:6]}"
+            elif abs(getattr(ov_s, 'change_pct', 0)) >= 5: tag = "领涨" if getattr(ov_s, 'change_pct', 0) > 0 else "领跌"
+        change = getattr(ov_s, 'change_pct', getattr(s, 'change_pct', 0)) if ov_s else getattr(s, 'change_pct', 0)
+        L(f"| {s.name}({s.code}) | {biz} | {tag} | {change:+.1f}% | {b1_status} | {getattr(s,'J','?')} | {getattr(s,'评分','?')} | {sig_str} |")
+
+    L("")
+    L(f"**B1标段({len(b1.b1_stocks)}只)**: {', '.join(f'{s.name}({s.code})' for s in b1.b1_stocks[:15])}")
+    L(f"\n**近B1观察({len(b1.near_b1_stocks)}只)**: {', '.join(f'{s.name}({s.code})' for s in b1.near_b1_stocks[:10])}")
+    L("")
+
+    if args.output:
+        with open(args.output, 'w', encoding='utf-8') as f:
+            f.write("\n".join(lines))
+        print(f"已保存到 {args.output}")
+    else:
+        print("\n".join(lines))
+
+
+def _get_biz(code, ov, max_len=60):
+    """从概览数据取主营业务"""
+    if not ov:
+        return ""
+    for s in ov.stocks:
+        if getattr(s, 'code', '') == code:
+            biz = getattr(s, 'business', '') or getattr(s, '主营产品名称', '')
+            return biz[:max_len] if biz else ""
+    return ""
+
+
 def main():
     parser = argparse.ArgumentParser(prog="zhi-xing", description="知行股票分析系统 CLI")
     sub = parser.add_subparsers(dest="command", help="子命令")
@@ -549,6 +959,45 @@ def main():
     p_fl = sub.add_parser("focus-sector-list", help="查看重点板块")
     p_fl.add_argument("--status", default="active", help="状态筛选")
 
+    # === Phase F: LLM 报告解析 ===
+    p_ls = sub.add_parser("llm-stock", help="个股AI技术解读（LLM增强，可选--sector 触发板块横向对比）")
+    p_ls.add_argument("--symbol", "-s", required=True, help="股票代码")
+    p_ls.add_argument("--days", type=int, default=114, help="K线天数")
+    p_ls.add_argument("--sector", help="所属板块名（指定后触发三层深度分析：个股+板块定位+大局研判）")
+
+    p_ln = sub.add_parser("llm-sector", help="板块扫描 + AI叙事增强")
+    p_ln.add_argument("--name", "-n", required=True, help="板块名")
+    p_ln.add_argument("--workers", type=int, default=20)
+    p_ln.add_argument("--days", type=int, default=120)
+
+    p_hl = sub.add_parser("holdings-letter", help="生成持仓日报（分析师口吻+次日建议）")
+    p_hl.add_argument("--output", "-o", help="报告输出路径")
+
+    p_wr_llm = sub.add_parser("watchlist-report", help="生成关注列表监控报告")
+    p_wr_llm.add_argument("--output", "-o", help="报告输出路径")
+
+    p_td = sub.add_parser("trade-diagnosis", help="交易前AI诊断")
+    p_td.add_argument("--symbol", "-s", required=True, help="股票代码")
+    p_td.add_argument("--name", help="股票名称")
+    p_td.add_argument("--action", required=True, choices=["buy", "sell"], help="操作方向")
+    p_td.add_argument("--shares", type=int, required=True, help="计划数量")
+    p_td.add_argument("--days", type=int, default=114, help="K线天数")
+
+    # === Phase G: 数据报告 ===
+    p_dr = sub.add_parser("data-report", help="个股完整数据报告（B1+基本面+估值+消息+板块+市场）")
+    p_dr.add_argument("--symbol", "-s", required=True, help="股票代码")
+    p_dr.add_argument("--name", help="股票名称")
+    p_dr.add_argument("--sector", help="所属板块名（传统板块扫描）")
+    p_dr.add_argument("--theme", help="主题/产业链名（如 机器人/算力/低空经济，精确对标产业链核心标的）")
+    p_dr.add_argument("--output", "-o", help="报告输出路径")
+    p_dr.add_argument("--days", type=int, default=114, help="K线天数")
+
+    p_sr = sub.add_parser("sector-report", help="板块扫描数据报告（龙头+B1+领涨+基本面）")
+    p_sr.add_argument("--name", "-n", required=True, help="板块名")
+    p_sr.add_argument("--output", "-o", help="报告输出路径")
+    p_sr.add_argument("--workers", type=int, default=20)
+    p_sr.add_argument("--days", type=int, default=120)
+
     args = parser.parse_args()
 
     if args.command == "list-sectors":
@@ -603,6 +1052,24 @@ def main():
         cmd_focus_sector_add(args)
     elif args.command == "focus-sector-list":
         cmd_focus_sector_list(args)
+
+    # === Phase F: LLM 报告解析 ===
+    elif args.command == "llm-stock":
+        cmd_llm_stock(args)
+    elif args.command == "llm-sector":
+        cmd_llm_sector(args)
+    elif args.command == "holdings-letter":
+        cmd_holdings_letter(args)
+    elif args.command == "watchlist-report":
+        cmd_watchlist_report(args)
+    elif args.command == "trade-diagnosis":
+        cmd_trade_diagnosis(args)
+
+    # === Phase G: 数据报告 ===
+    elif args.command == "data-report":
+        cmd_data_report(args)
+    elif args.command == "sector-report":
+        cmd_sector_report(args)
 
     else:
         parser.print_help()

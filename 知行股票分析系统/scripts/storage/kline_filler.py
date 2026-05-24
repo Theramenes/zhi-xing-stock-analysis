@@ -32,45 +32,55 @@ def ensure_candles(code: str, required_days: int = 114) -> List[dict]:
     if len(candles) >= required_days:
         return candles
 
-    # 2. 从本地交易日历算缺口（不再每次调 API）
-    from datetime import timedelta
-    today = datetime.now()
-    start = (today - timedelta(days=required_days * 3)).strftime("%Y-%m-%d")
-    end = today.strftime("%Y-%m-%d")
-    trading_days = db.get_trading_days(start, end)  # 本地缓存
-    if not trading_days:
-        print(f"  [filler] 无交易日历，返回现有 {len(candles)} 天")
+    # 2. 从本地交易日历精确取最近 required_days 个交易日算缺口
+    end = datetime.now().strftime("%Y-%m-%d")
+    db.ensure_trading_calendar(end=end)
+    all_days = db.get_trading_days("2020-01-01", end)
+    if len(all_days) < required_days:
+        print(f"  [filler] 交易日历不足 {required_days} 天，返回现有 {len(candles)} 天")
         return candles
+    trading_days = all_days[-required_days:]
 
     missing = db.get_missing_dates(code, trading_days)
-    # 只补最近 required_days 天，不拉多余历史
-    if len(missing) > required_days:
-        missing = missing[-required_days:]
     if not missing:
         return candles
 
     print(f"  [filler] {code}: DB有{len(candles)}天, 补最近{len(missing)}天...")
 
-    # 3. 补缺：优先逐日 snapshot（交易日历倒推），失败则 date_sequence 批量
-    import time as _time
+    # 3. 补缺：优先逐日 snapshot（THS_SS，多线程），失败则 date_sequence 批量
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from data_source.ifind_client import IFindClient
 
     client = IFindClient()
     ifnd_code = IFindClient._to_ifind_code(code)
     filled = 0
 
-    # 先试 snapshot 逐日补（THS_SS，单日 15:00:00）
-    for d in missing:
-        resp = client._try_snapshot(ifnd_code, d)
-        if resp and resp.candles:
-            rows = [{"date": c.date, "open": c.open, "high": c.high,
-                     "low": c.low, "close": c.close, "volume": c.volume}
-                    for c in resp.candles]
-            db.upsert_candles(code, rows)
-            filled += len(rows)
-        _time.sleep(0.15)
+    def _snap_one(d: str):
+        try:
+            resp = client._try_snapshot(ifnd_code, d)
+            if resp and resp.candles:
+                return [{"date": c.date, "open": c.open, "high": c.high,
+                         "low": c.low, "close": c.close, "volume": c.volume}
+                        for c in resp.candles]
+        except Exception:
+            pass
+        return None
+
+    # 多线程 snapshot（10 并发，不写 sleep，靠 workers 控制节奏）
+    snap_rows = []
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        futures = {ex.submit(_snap_one, d): d for d in missing}
+        for f in as_completed(futures):
+            rows = f.result()
+            if rows:
+                snap_rows.extend(rows)
+    snap_count = len(snap_rows)
+    if snap_rows:
+        db.upsert_candles(code, snap_rows)
+        filled += snap_count
 
     # snapshot 搞不定的批量走 date_sequence
+    ds_count = 0
     still_missing = db.get_missing_dates(code, trading_days)
     if still_missing:
         batches = _batch_dates(still_missing)
@@ -81,10 +91,10 @@ def ensure_candles(code: str, required_days: int = 114) -> List[dict]:
                          "low": c.low, "close": c.close, "volume": c.volume}
                         for c in resp.candles]
                 db.upsert_candles(code, rows)
-                filled += len(rows)
-            _time.sleep(0.3)
+                ds_count += len(rows)
+        filled += ds_count
     if filled:
-        print(f"  [filler] {code}: 补缺 {filled} 条")
+        print(f"  [filler] {code}: snapshot={snap_count}, date_sequence={ds_count}, 合计={filled}")
 
     return db.get_candles(code, required_days)
 
