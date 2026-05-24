@@ -1,6 +1,6 @@
 """
 数据源注册与降级链路
-优先级: iFind > freeStockLine > agent-stock(local)
+多源级联: iFind > Efinance > Akshare > FreeStockLine > Baostock > SQLite 缓存
 """
 from typing import Optional
 
@@ -13,7 +13,10 @@ from .cached_adapter import CachedAdapter
 
 class DataSourceRegistry:
     """数据源注册表，管理优先级和降级
-    优先级: iFind > freeStockLine > 缓存兜底
+
+    K线通过 KlineCascade 走完整的多源级联链:
+      iFind → Efinance → Akshare → FreeStockLine → Baostock → SQLite
+    实时行情 / 板块列表仍走旧链路 (iFind → free → cache)
     """
 
     def __init__(self):
@@ -45,17 +48,25 @@ class DataSourceRegistry:
     def available_sources(self) -> list:
         return self._priority.copy()
 
+    @property
+    def all_cascade_sources(self) -> list:
+        """返回包含级联中所有源的列表"""
+        base = self._priority.copy()
+        try:
+            from data_source.kline_cascade import get_cascade
+            extra = [s for s in get_cascade().available_sources if s not in base]
+            return base + extra
+        except Exception:
+            return base
+
     def get_kline(self, symbol: str, days: int = 120, force: str = None) -> DataResponse:
         """
-        按优先级获取K线，自动降级。
+        按优先级获取K线，自动降级（通过 KlineCascade 多源级联）。
 
         Args:
             symbol: 股票代码
             days: 数据天数
-            force: 强制使用指定数据源（ifind/free/local），跳过优先级
-
-        Returns:
-            DataResponse with candles or error
+            force: 强制使用指定数据源，跳过优先级
         """
         req = DataRequest(symbol=symbol, days=days)
 
@@ -65,30 +76,39 @@ class DataSourceRegistry:
             src = self._sources[override]
             if src.is_available():
                 resp = src.get_kline(req)
-                if resp.ok:
+                if resp.ok and len(resp.candles) >= 30:
                     return resp
-                # 如果强制的源失败，且非 local，降级到 local
-                print(f"  ⚠️ [{override}] 查询失败: {resp.error}，降级到本地源")
+                print(f"  ⚠️ [{override}] 查询失败，走多源级联…")
 
-        # 正常优先级链路
-        last_error = ""
-        for name in self._priority:
-            src = self._sources[name]
-            if not src.is_available():
-                continue
-            resp = src.get_kline(req)
-            if resp.ok and len(resp.candles) >= 30:
-                return resp
-            last_error = resp.error
+        # 走 KlineCascade 多源级联
+        try:
+            from data_source.kline_cascade import get_cascade
+            cascade = get_cascade()
+            candles, source = cascade.get_kline(symbol, days=days)
+            if candles:
+                return DataResponse(
+                    ok=True,
+                    candles=[Candle(date=c["date"], open=c["open"], high=c["high"],
+                                    low=c["low"], close=c["close"], volume=c["volume"])
+                             for c in candles],
+                    source=source,
+                )
+        except Exception as e:
+            print(f"  ⚠️ KlineCascade 异常: {e}，降级到本地源")
+
+        # 全失败，本地缓存兜底
+        cache = self._sources.get("cache")
+        if cache:
+            return cache.get_kline(req)
 
         return DataResponse(
             ok=False,
-            error=f"所有数据源均失败 (已尝试: {', '.join(self._priority)}). 最后错误: {last_error}",
+            error="所有数据源均失败（含多源级联）",
             source="none"
         )
 
     def get_realtime(self, symbol: str) -> Optional[dict]:
-        """获取实时行情（优先iFind）"""
+        """获取实时行情（优先iFind → free → akshare）"""
         for name in self._priority:
             src = self._sources[name]
             result = src.get_realtime(symbol)

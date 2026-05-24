@@ -1,8 +1,8 @@
 """
-K线按需填充器 — 总是先查 DB，不够再拉
+K线按需填充器 — 总是先查 DB，不够再用多源级联补
 
 核心逻辑:
-  ensure_candles(code) → 查 DB → 算缺口 → 四源降级补 → 返回 candles
+  ensure_candles(code) → 查 DB → 算缺口 → KlineCascade 多源降级补 → 返回 candles
 """
 import sys
 import os
@@ -16,7 +16,7 @@ from .db import get_db
 
 def ensure_candles(code: str, required_days: int = 114) -> List[dict]:
     """
-    确保某只股票有足够 K 线数据。不够则自动补缺。
+    确保某只股票有足够 K 线数据。不够则走多源级联自动补缺。
 
     Args:
         code: 股票代码 (如 300083)
@@ -47,80 +47,17 @@ def ensure_candles(code: str, required_days: int = 114) -> List[dict]:
 
     print(f"  [filler] {code}: DB有{len(candles)}天, 补最近{len(missing)}天...")
 
-    # 3. 补缺：优先逐日 snapshot（THS_SS，多线程），失败则 date_sequence 批量
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    from data_source.ifind_client import IFindClient
+    # 3. 走多源级联补缺口
+    from data_source.kline_cascade import get_cascade
+    cascade = get_cascade()
 
-    client = IFindClient()
-    ifnd_code = IFindClient._to_ifind_code(code)
-    filled = 0
-
-    def _snap_one(d: str):
-        try:
-            resp = client._try_snapshot(ifnd_code, d)
-            if resp and resp.candles:
-                return [{"date": c.date, "open": c.open, "high": c.high,
-                         "low": c.low, "close": c.close, "volume": c.volume}
-                        for c in resp.candles]
-        except Exception:
-            pass
-        return None
-
-    # 多线程 snapshot（10 并发，不写 sleep，靠 workers 控制节奏）
-    snap_rows = []
-    with ThreadPoolExecutor(max_workers=10) as ex:
-        futures = {ex.submit(_snap_one, d): d for d in missing}
-        for f in as_completed(futures):
-            rows = f.result()
-            if rows:
-                snap_rows.extend(rows)
-    snap_count = len(snap_rows)
-    if snap_rows:
-        db.upsert_candles(code, snap_rows)
-        filled += snap_count
-
-    # snapshot 搞不定的批量走 date_sequence
-    ds_count = 0
-    still_missing = db.get_missing_dates(code, trading_days)
-    if still_missing:
-        batches = _batch_dates(still_missing)
-        for start_d, end_d in batches:
-            resp = client.get_kline_range(code, start_d, end_d)
-            if resp.ok and resp.candles:
-                rows = [{"date": c.date, "open": c.open, "high": c.high,
-                         "low": c.low, "close": c.close, "volume": c.volume}
-                        for c in resp.candles]
-                db.upsert_candles(code, rows)
-                ds_count += len(rows)
-        filled += ds_count
-    if filled:
-        print(f"  [filler] {code}: snapshot={snap_count}, date_sequence={ds_count}, 合计={filled}")
+    start_date = missing[0]
+    end_date = missing[-1]
+    new_candles, source = cascade.get_kline_range(code, start_date, end_date)
+    if new_candles:
+        n = db.upsert_candles(code, new_candles)
+        print(f"  [filler] {code}: [{source}] 拉取{len(new_candles)}条, 写入{n}条")
+    else:
+        print(f"  [filler] {code}: 所有数据源失败，K线不足")
 
     return db.get_candles(code, required_days)
-
-
-def _batch_dates(dates: List[str]) -> List[tuple]:
-    """将日期列表合并为连续区间 [(start, end), ...]"""
-    if not dates:
-        return []
-    sorted_dates = sorted(dates)
-    batches = []
-    batch_start = sorted_dates[0]
-    prev = sorted_dates[0]
-    for d in sorted_dates[1:]:
-        # 简单连续判断（不考虑周末，因为 missing 本身就是交易日）
-        if d <= prev:
-            continue
-        # 如果间隔超过 10 天，另起一批
-        from datetime import datetime, timedelta
-        try:
-            dp = datetime.strptime(prev, "%Y-%m-%d")
-            dc = datetime.strptime(d, "%Y-%m-%d")
-            if (dc - dp).days > 10:
-                batches.append((batch_start, prev))
-                batch_start = d
-        except ValueError:
-            pass
-        prev = d
-    batches.append((batch_start, prev))
-    return batches

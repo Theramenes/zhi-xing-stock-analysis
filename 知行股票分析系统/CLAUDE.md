@@ -4,27 +4,46 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-知行股票分析系统（简称「知行系统」），基于知行超级B1、单针下20、知行趋势线等自研指标的 A 股量化分析 CLI 工具。覆盖板块概览、板块B1扫描、全市场扫描、持仓评估、早盘前瞻。
+知行股票分析系统（简称「知行系统」），基于知行超级B1、单针下20、知行趋势线等自研指标的 A 股量化分析 CLI 工具。覆盖板块概览、板块B1扫描、全市场扫描、持仓管理、关注追踪、B1状态机、日终复盘。
+
+Skill 目录结构：
+
+```
+知行交易分析系统Skill/           ← Skill 顶层（有独立 .git）
+├── SKILL.md                     ← Skill 安装说明
+├── docs/                        ← 设计文档（架构/Phase计划/测试指南）
+├── tests/                       ← pytest 测试套件
+└── 知行股票分析系统/             ← 本目录（Skill 实际代码）
+    └── scripts/
+```
 
 ## 开发环境
 
 ### 依赖
 
 ```bash
-pip install requests   # iFind HTTP 调用需要
-```
+# 核心（必须）
+pip install requests pandas
 
-其余均为 Python 标准库（json/subprocess/sqlite3/datetime/threading），无需额外安装。
+# 多源级联（免费 K 线兜底）
+pip install akshare efinance baostock
+
+# LLM 增强（可选）
+pip install openai
+
+# 测试
+pip install pytest
+```
 
 ### 外部数据源（必须在同级目录克隆）
 
 ```bash
-cd 知行交易分析系统/..
+cd 知行交易分析系统Skill/..
 git clone https://github.com/Etherstrings/tonghuashun-ifind-skill ifind-skill
 git clone https://github.com/Etherstrings/freeStockLIneskill freestock-skill
 ```
 
-`scripts/data_source/config.py` 会自动检测这两个路径（OC 环境或本地环境）。
+`scripts/data_source/config.py` 自动检测路径。
 
 ### iFind Token 配置（必须）
 
@@ -33,114 +52,187 @@ python ../ifind-skill/tonghuashun-ifind-skill/scripts/ifind_cli.py \
   auth-set-refresh-token --refresh-token <你的refresh_token>
 ```
 
-Token 持久化到 `~/.openclaw/tonghuashun-ifind-skill/token_state.json`。
+### LLM 增强（可选，Phase F）
+
+环境变量：
+
+```bash
+ZX_LLM_BASE_URL=https://api.anthropic.com/v1   # API endpoint
+ZX_LLM_API_KEY=<your-key>                       # API Key
+ZX_LLM_MODEL=claude-sonnet-4-6                  # 模型名
+ZX_LLM_THINKING=true                            # 开启思考模式
+ZX_LLM_THINK_BUDGET=4096                        # 思考 token 预算
+```
 
 ### 飞书发布（可选）
 
 ```bash
 npm install -g feishu-mcp
+# 环境变量: FEISHU_APP_ID / FEISHU_APP_SECRET / FEISHU_AUTH_TYPE=user
 ```
-
-环境变量：`FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_AUTH_TYPE=user`
 
 ## 常用命令
 
 ```bash
-# 单股指标计算（从 stdin 或 --input 读取 K 线 JSON）
-python scripts/cli.py indicator --symbol 603206 --input data/scan_cache/002460.json
+# === 板块扫描 ===
+python scripts/cli.py scan-sector-overview --name 电池          # 板块概览（不扫个股）
+python scripts/cli.py scan-sector-b1 --name 电池                # 板块B1扫描（默认自动入库到关注列表）
+python scripts/cli.py scan-sector-b1 --name 电池 --no-auto-save # 仅出报告，不入库
+python scripts/cli.py scan-market --max-sectors 10              # 全市场扫描
 
-# 缩爆B1扫描
+# === 单股指标 ===
+python scripts/cli.py indicator --symbol 603206 --input candles.json
 python scripts/cli.py suo-bao --symbol 603206 --input candles.json
 
-# 板块概览（走势/资金/龙头/异动，不扫个股）
-python scripts/cli.py scan-sector-overview --name 电池
+# === 持仓管理 ===
+python scripts/cli.py holdings-add --code 002460 --cost 45.2 --qty 1000 --strategy 长线
+python scripts/cli.py holdings-list [--verbose]
+python scripts/cli.py transaction-add --code 002460 --direction buy --price 45.2 --qty 500 --reason B1信号
+python scripts/cli.py transaction-list [--code 002460] [--days 90]
 
-# 板块B1扫描（逐只取K线 + 指标计算）
-python scripts/cli.py scan-sector-b1 --name 电池
+# === 关注列表 ===
+python scripts/cli.py watchlist-add --code 300750 --reason 板块龙头 --priority 1
+python scripts/cli.py watchlist-list [--status active|observing|archived]
+python scripts/cli.py watchlist-remove --code 300750 --reason 已建仓
 
-# 全市场扫描（以板块为单元循环）
-python scripts/cli.py scan-market --max-sectors 10
+# === 日终追踪（拉K线→算指标→状态转换→预警）===
+python scripts/cli.py daily-review [--sector 电池,锂电池] [--workers 10]
+python scripts/cli.py b1-tracking --code 002460 [--limit 30]
 
-# 从原始JSON生成报告
-python scripts/cli.py report --input result.json --output report.md
+# === 重点板块 ===
+python scripts/cli.py focus-sector-add --name 电池 --priority 1
+python scripts/cli.py focus-sector-list
 
-# 发布报告到飞书
+# === 飞书 ===
 python scripts/cli.py publish --input report.md --title "电池B1扫描"
-
-# 飞书开关（默认 --publish 开启）
 python scripts/cli.py scan-sector-b1 --name 电池 --no-publish   # 仅本地
+
+# === 测试 ===
+pytest tests/ -v
+pytest tests/test_portfolio.py -v
 ```
 
 ## 架构总览
 
-### 数据流架构
-
 ```
-用户查询 → cli.py 路由 → 数据源层(registry) → 扫描引擎 → 指标计算 → 报告生成 → (飞书发布)
+触发层             数据层               指标层           追踪/存储层          报告层           输出层
+cli.py          → data_source/       → indicators/    → tracking/         → reporting/     → 飞书文档
+cron/GitHub       (iFind→free→        b1_calculator    state_machine       generator       本地MD
+Actions           akshare→SQLite)      suo_bao_b1      daily_review        feishu_publisher JSON摘要
+                                                       storage/portfolio_db
+                                                       storage/db.py
+                                                  ⇅
+                                           llm/enhancer (Phase F, 可选)
 ```
 
 ### 模块职责
 
 | 模块 | 路径 | 职责 |
 |------|------|------|
-| CLI 入口 | `scripts/cli.py` | 子命令分发，7个子命令 |
-| 指标计算 | `scripts/indicators/` | `b1_calculator.py`（4套指标）、`suo_bao_b1.py`（缩爆模式） |
-| 数据源层 | `scripts/data_source/` | 抽象基类 + iFind/Free/Cache 三层降级链路 |
-| 扫描引擎 | `scripts/scanning/` | `sector_scanner.py`（SectorOverview + SectorB1Scanner）、`industry_analyzer.py`（细分行业聚合）、`cache_manager.py` |
-| 报告生成 | `scripts/reporting/` | `generator.py`（Markdown）、`feishu_publisher.py` + `generate_feishu_doc.py`（飞书） |
-| 本地数据库 | `scripts/storage/` | `db.py`（SQLite K线表 `stock_daily`）、`kline_filler.py`（按需补缺） |
-| 黑名单 | `scripts/config/blacklist.py` | 688/920/8/ST 过滤，环境变量可覆盖 |
+| CLI 入口 | `scripts/cli.py` | 18个子命令分发 |
+| 指标计算 | `scripts/indicators/` | `b1_calculator.py`（4套指标）、`suo_bao_b1.py`（缩爆）、`valuation.py`（估值） |
+| 数据源层 | `scripts/data_source/` | 抽象基类 + iFind/Free/Cache 降级链路 + `akshare_data/`（chip/financial/market/news/valuation） |
+| 扫描引擎 | `scripts/scanning/` | `sector_scanner.py`（SectorOverview + SectorB1Scanner）、`industry_analyzer.py` |
+| 本地数据库 | `scripts/storage/` | `db.py`（14张表）、`kline_filler.py`（按需补缺）、`portfolio_db.py`（业务CRUD）、`daily_update.py`（三层日更） |
+| 日终追踪 | `scripts/tracking/` | `state_machine.py`（9状态流转）、`daily_review.py`（拉K线→算指标→状态转换→预警） |
+| 报告生成 | `scripts/reporting/` | `generator.py`（Markdown）、`feishu_publisher.py`（飞书文档）、`data_report.py`（数据报告） |
+| 多源级联 | `scripts/data_source/kline_cascade.py` | `KlineCascade`（6级降链：iFind→Efinance→Akshare→Free→Baostock→SQLite）、`fetchers/`（3个免费 K线 Fetcher） |
+| LLM 增强 | `scripts/llm/` | `client.py`（OpenAI-compatible）、`enhancer.py`（缓存到 `llm_report` 表）、`prompts/`（6套Prompt模板） |
+| 行业链 | `scripts/config/theme_chains.py` | 用户说"机器人/低空经济"时自动映射到子行业和标的 |
+| 黑名单 | `scripts/config/blacklist.py` | 688/920/8/ST 过滤 |
 
-### 数据源优先级（硬编码，不可违反）
+## 数据库表（14张，SQLite `data/kline.db`）
 
-**K线/板块成分股：iFind（唯一源）→ 本地缓存** — 严禁降级到 freeStockLine。历史教训：2025-05-15 freeStockLine K线数据与真实行情不符，导致晶丰明源代码混用。iFind token 失效时必须告知用户并等待选择，禁止自动降级。
+| 类别 | 表名 | 说明 |
+|------|------|------|
+| K线 | `stock_daily`、`trading_calendar` | 日线数据 + 交易日历 |
+| 持仓 | `position`、`trade_record`、`position_snapshot` | 头寸 + 交易流水 + 日快照 |
+| 关注 | `watchlist`、`watchlist_daily` | 关注票 + 每日指标快照 |
+| B1追踪 | `b1_scan`、`b1_candidate`、`b1_tracking` | 扫描批次 + 候选明细 + 状态追踪 |
+| 板块 | `focus_sector`、`focus_sector_daily` | 重点板块 + 日快照 |
+| 审计/LLM | `audit_log`、`llm_report` | 操作审计 + LLM 生成缓存 |
 
-| 数据类型 | 主源 | 降级 |
-|---------|------|------|
-| K线/板块成分股 | iFind | 本地缓存 |
-| 行情/板块排行/资金流/龙虎榜 | iFind | freeStockLine（降级需输出 ⚠️ 警告） |
-| 新闻/公告/研报 | freeStockLine | N/A |
-| 指标计算/评分 | LOCAL | N/A |
+## 数据源级联链路（对标 JusticePlutus DataFetcherManager）
 
-用户覆盖关键词：`优先免费源` / `用免费数据` → 跳过iFind；`只用ifind` / `付费数据` → 仅iFind；`双源对比` → 双源同时查询。
+### K 线日线
 
-### 板块查询路由（关键设计）
+```
+registry.get_kline / kline_filler.ensure_candles
+  → ① iFind (HTTP: date_sequence → cmd_history → snapshot)  [付费, 优先]
+  → ② Efinance (免费, 快)                                     [pip efinance]
+  → ③ Akshare (免费, 全但慢, 含限速 0.5s)                     [pip akshare]
+  → ④ FreeStockLine (免费, K线不准但能用)                     [subprocess CLI]
+  → ⑤ Baostock (免费, 需 login/logout)                       [pip baostock]
+  → ⑥ SQLite stock_daily (本地缓存, 最终兜底)
+```
 
-- **行业优先于概念**：用户同时提行业和概念 → 只走行业。概念 590 只太杂，看不出结构。
-- **口语行业名**：iFind 查询用 `"电池行业"`，不用层级路径 `"电力设备-电池"`（前缀匹配会扩大到整个一级行业 408 只）。
-- **板块概览 vs B1 扫描拆分为两个命令**：`scan-sector-overview`（不扫个股）和 `scan-sector-b1`（深扫个股K线）。
+**熔断规则**：单源连续失败 3 次自动禁用，成功后重置。
 
-### 指标计算体系（本地计算，永不调外部API）
+### 实时行情
 
-4套指标统一通过 `b1_calculator.py` 计算：
+```
+① iFind THS_RQ → ② FreeStockLine → ③ Akshare(sina/tencent) → ④ Efinance
+```
 
-| 指标套件 | 核心信号 | 参考文档 |
-|---------|---------|---------|
-| 知行趋势(白黄线) | 白线>黄线=多头，白线<黄线=空头 | `references/indicator-guide.md` |
-| 知行超级B1 | 超卖缩量B/拐头B/超缩量B/原始B1/回踩白线B/回踩白线超级B/回踩黄线B | 同上 |
-| 基础B1(B1B2B3) | 三级递进：发现→验证→确认 | 同上 |
-| 单针下20 | 短期K≤20 + 长期K≥75，双线归零 | 同上 |
-| 缩爆B1 | 爆量后缩量回踩支撑模式 | 同上 |
+### 板块/成分股
 
-评分体系：5维度100分（B1信号30% / 趋势质量20% / 量能15% / 异动活跃度20% / 风险15%），一票否决（涨停/ST/成交额<1000万/重大利空5日内）。
+```
+① iFind smart-query → ② FreeStockLine sector → ③ Akshare stock_board
+```
 
-### 环境变量
+### 筹码分布
+
+```
+① Akshare (akshare_data/chip.py) → ② SQLite fallback
+```
+
+实现位置：
+- `scripts/data_source/kline_cascade.py` — `KlineCascade` 类（多源级联管理器）
+- `scripts/data_source/fetchers/` — `EfinanceFetcher` / `AkshareFetcher` / `BaostockFetcher`
+- `scripts/data_source/registry.py` — `DataSourceRegistry.get_kline` 内部走级联
+- `scripts/storage/kline_filler.py` — `ensure_candles` 走级联补缺
+
+## B1 状态机
+
+```
+watching → near_b1(J<20) → b1(有信号) → bought(用户买入) → holding
+   ↑                         │                │                │
+   │                         ↓                │                ↓
+   └──(7天观察期满)── observing ←(B1消失)─────┘         sell_candidate → sold
+```
+
+## 环境变量
 
 ```bash
-ZX_IFIND_CLI=/path/to/ifind_cli.py       # iFind CLI 路径覆盖
-ZX_FREE_CLI=/path/to/stockline_cli.py    # freeStockLine CLI 路径覆盖
-ZX_DATA_SOURCE=auto|ifind|free|cache     # 强制数据源
-ZX_BAN_BOARDS=688,920,8                  # 排除代码前缀
-ZX_BAN_ST=true|false                     # 是否排除ST
-ZX_BAN_CODES=000001,000002               # 排除指定代码
+# 数据源
+ZX_IFIND_CLI=/path/to/ifind_cli.py
+ZX_FREE_CLI=/path/to/stockline_cli.py
+ZX_DATA_SOURCE=auto|ifind|free|cache
+
+# 黑名单
+ZX_BAN_BOARDS=688,920,8
+ZX_BAN_ST=true|false
+ZX_BAN_CODES=000001,000002
+
+# LLM (Phase F, 可选)
+ZX_LLM_BASE_URL=https://api.anthropic.com/v1
+ZX_LLM_API_KEY=<key>
+ZX_LLM_MODEL=claude-sonnet-4-6
+ZX_LLM_THINKING=true
+ZX_LLM_THINK_BUDGET=4096
 ```
 
 ## 迭代路线
 
-当前完成 Phase 1-3（指标/数据源/板块扫描），迭代计划见 `迭代需求 - 数据库功能.md`：
+| Phase | 内容 | 状态 |
+|-------|------|------|
+| 1-3 | 指标计算 + 数据源 + 板块扫描 + 飞书发布 | ✅ 完成 |
+| A | SQLite K线库 + ensure_candles + 交易日历 | ✅ 完成 |
+| B | 多数据源降级（iFind→free→akshare→SQLite） | 🔄 进行中（akshare_data/ 已建） |
+| C | 持仓管理 + 关注列表 + B1追踪 + 日终流程 | ✅ 完成 |
+| D | iFind 日快照 (THS_SS) | 🔄 daily_update.py 已实现三层策略 |
+| E | 飞书增强（Webhook/定时任务） | 📋 计划中 |
+| F | LLM 报告增强（持仓家书/板块叙事/交易诊断） | 🔄 llm/ 框架就绪，待接入 |
+| G | 综合看板与复盘 | 📋 设计文档就绪 |
 
-- **Phase A**: SQLite K线本地数据库 + `ensure_candles` 按需填充（已部分实现：`scripts/storage/db.py` + `kline_filler.py`）
-- **Phase B**: 多数据源降级（iFind → freeStockLine → akshare → 本地缓存）
-- **Phase C**: 关注/持仓管理（`data/holdings.yaml` + `data/watchlist.yaml`）
-- **Phase D**: iFind 日快照（THS_SS）增量更新
-- **Phase E**: 飞书定时任务/Webhook 推送
+详细计划见 `docs/` 目录。

@@ -109,12 +109,37 @@ ZX_BAN_CODES=000001,000002  # 额外排除的指定代码
 ## CLI 命令
 
 ```bash
+# 板块扫描
+python scripts/cli.py scan-sector-overview --name 电池        # 板块概览（走势/资金/龙头/异动）
+python scripts/cli.py scan-sector-b1 --name 电池              # 板块B1扫描（默认自动入库到关注列表）
+python scripts/cli.py scan-market [--max-sectors 10]          # 全市场扫描
+
+# 单股指标
 python scripts/cli.py indicator --symbol 603206 [--input candles.json]
 python scripts/cli.py suo-bao --symbol 603206 [--input candles.json]
-python scripts/cli.py score --symbol 603206              # Phase 3
-python scripts/cli.py scan-sector --name 锂电池           # Phase 4
-python scripts/cli.py scan-market                         # Phase 4
-python scripts/cli.py report --type sector                # Phase 5
+
+# 持仓管理 (Phase C)
+python scripts/cli.py holdings-add --code 002460 --cost 45.2 --qty 1000 [--strategy 长线]
+python scripts/cli.py holdings-list [--verbose]
+python scripts/cli.py transaction-add --code 002460 --direction buy --price 45.2 --qty 500 --reason B1信号
+python scripts/cli.py transaction-list [--code 002460] [--days 90]
+
+# 关注列表 (Phase C)
+python scripts/cli.py watchlist-add --code 300750 --name 宁德时代 --reason 板块龙头 --priority 1
+python scripts/cli.py watchlist-list [--status active|observing|archived]
+python scripts/cli.py watchlist-remove --code 300750 --reason 已建仓
+
+# 日终追踪 (Phase C)
+python scripts/cli.py daily-review [--sector 电池,锂电池] [--workers 10]
+python scripts/cli.py b1-tracking --code 002460 [--limit 30]
+
+# 重点板块 (Phase C)
+python scripts/cli.py focus-sector-add --name 电池 --priority 1
+python scripts/cli.py focus-sector-list
+
+# 报告发布
+python scripts/cli.py report --input result.json --output report.md
+python scripts/cli.py publish --input report.md --title "电池B1扫描"
 ```
 
 ## 部署配置
@@ -124,26 +149,72 @@ python scripts/cli.py report --type sector                # Phase 5
 **核心依赖**: iFind token（必须）、飞书 CLI（可选，用于自动发布）
 **OC 就绪**: iFind/freeStockLine 已预装，仅需配置 refresh_token
 
+### LLM 增强（可选，Phase F）
+
+```bash
+export ZX_LLM_BASE_URL=https://api.anthropic.com/v1
+export ZX_LLM_API_KEY=<your-key>
+export ZX_LLM_MODEL=claude-sonnet-4-6
+export ZX_LLM_THINKING=true              # 可选
+export ZX_LLM_THINK_BUDGET=4096          # 可选
+```
+
+配置后，持仓评估/个股分析/板块叙事可自动生成自然语言解读。
+
 ## 目录结构
 
 ```
-知行股票分析系统/
-├── SKILL.md                  ← 本文件（技能入口）
+知行交易分析系统Skill/
+├── SKILL.md                  ← 本文件（Skill 安装入口）
+├── docs/                     ← 设计文档（架构/Phase计划/测试指南）
+├── tests/                    ← pytest 测试套件
 ├── scripts/
-│   ├── cli.py                ← 统一CLI入口
-│   ├── indicators/
-│   │   ├── b1_calculator.py  ← 4套知行指标
-│   │   └── suo_bao_b1.py     ← 缩爆B1
-│   ├── data_source/          ← 数据源层（Phase 2）
-│   ├── scanning/             ← 扫描引擎（Phase 4）
-│   └── reporting/            ← 报告生成（Phase 5）
-├── references/
-│   ├── indicator-guide.md    ← 指标使用手册
-│   └── capability-matrix.md  ← 数据源能力矩阵
-├── agents/                   ← Agent定义（Phase 5）
-├── data/scan_cache/          ← 按日期分片缓存
-└── templates/                ← 报告模板（Phase 5）
-```
+│   └── install_skill.sh      ← Skill 安装脚本
+└── 知行股票分析系统/          ← Skill 实际代码
+    ├── SKILL.md              ← Skill 能力说明
+    ├── CLAUDE.md             ← Claude Code 开发指南
+    ├── scripts/
+    │   ├── cli.py            ← 统一CLI入口（18个子命令）
+    │   ├── pull_sector_klines.py  ← 板块K线批量拉取
+    │   ├── config/
+    │   │   ├── blacklist.py       ← 黑名单过滤
+    │   │   ├── llm_config.py      ← LLM 配置（Phase F）
+    │   │   └── theme_chains.py    ← 行业链映射（机器人/低空经济/AI等）
+    │   ├── indicators/
+    │   │   ├── b1_calculator.py   ← 4套知行指标
+    │   │   ├── suo_bao_b1.py      ← 缩爆B1
+    │   │   └── valuation.py       ← 估值指标
+    │   ├── data_source/
+    │   │   ├── ifind_client.py    ← iFind API
+    │   │   ├── free_client.py     ← freeStockLine API
+    │   │   ├── registry.py        ← 降级链路
+    │   │   ├── fundamental_cascade.py ← 基本面级联
+    │   │   └── akshare_data/      ← akshare 子模块（chip/financial/market/news/valuation）
+    │   ├── scanning/
+    │   │   ├── sector_scanner.py  ← SectorOverview + SectorB1Scanner
+    │   │   └── industry_analyzer.py ← 细分行业聚合
+    │   ├── storage/
+    │   │   ├── db.py              ← SQLite（14张表）
+    │   │   ├── kline_filler.py    ← K线按需填充
+    │   │   ├── portfolio_db.py    ← 业务CRUD（持仓/关注/B1追踪/板块）
+    │   │   └── daily_update.py    ← 三层日更新（THS_RQ→snapshot→date_sequence）
+    │   ├── tracking/
+    │   │   ├── state_machine.py   ← B1状态机（9状态流转）
+    │   │   └── daily_review.py    ← 日终流程（拉K线→算指标→状态转换→预警）
+    │   ├── reporting/
+    │   │   ├── generator.py       ← Markdown 报告生成
+    │   │   ├── data_report.py     ← 数据报告
+    │   │   ├── feishu_publisher.py ← 飞书文档发布
+    │   │   └── generate_feishu_doc.py
+    │   └── llm/                   ← LLM 增强（Phase F）
+    │       ├── client.py           ← OpenAI-compatible 客户端
+    │       ├── enhancer.py         ← 报告自然语言增强（缓存到 llm_report 表）
+    │       ├── market_context.py   ← 市场上下文
+    │       └── prompts/           ← 6套 Prompt 模板
+    ├── references/                ← 参考文档
+    ├── agents/                    ← Agent定义
+    ├── data/scan_cache/           ← 按日期分片缓存
+    └── templates/                 ← 报告模板
 
 ## 能力边界
 

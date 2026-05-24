@@ -35,7 +35,7 @@
 **JusticePlutus 数据源体系**：
 
 | 数据类别 | 数据源 | 关键方法/文件 |
-|---------|--------|-------|
+|---------|-------|------|
 | K线/历史行情 | 5源级联 (HSCloud→Wencai→iFind→Tushare→Akshare) | `DataFetcherManager.get_daily_data()` |
 | 实时行情 | 同上5源 | `DataFetcherManager.get_realtime_quote()` |
 | 筹码分布 | 同上5源，独立熔断器 | `DataFetcherManager.get_chip_distribution()` |
