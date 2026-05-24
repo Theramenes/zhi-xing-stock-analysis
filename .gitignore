@@ -2,8 +2,8 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
-*.db
-data/*.db
+# *.db  # 排除其他 db，但 data/kline.db 不受此限
+# data/*.db
 *.tmp
 *.log
 .DS_Store
