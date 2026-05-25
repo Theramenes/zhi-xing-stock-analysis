@@ -997,7 +997,7 @@ def main():
     p_as = sub.add_parser("account-update", help="更新账户快照（总资产/可用资金/仓位）")
     p_as.add_argument("--total", type=float, required=True, help="总资产")
     p_as.add_argument("--cash", type=float, required=True, help="可用资金")
-    p_as.add_argument("--position-ratio", type=float, help="仓位%")
+    p_as.add_argument("--position-ratio", type=float, help="仓位(百分比)")
     p_as.add_argument("--pnl", type=float, help="总持仓盈亏")
 
     # === Phase G: 数据报告 ===

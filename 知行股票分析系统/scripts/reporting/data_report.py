@@ -131,9 +131,9 @@ def _section_b1(lines, code, name, indicators):
     L("")
 
     sig_str = " + ".join(signals) if signals else "无"
-    L(f"**B1 信号**: {sig_str}  |  B1/B2/B3: {'✓' if b1 else '✗'}/{'✓' if b2 else '✗'}/{'✓' if b3 else '✗'}")
+    L(f"**B1 信号**: {sig_str}  |  B1/B2/B3: {'✓' if b1 else 'X'}/{'✓' if b2 else 'X'}/{'✓' if b3 else 'X'}")
     suo = "超缩量" if suo_extreme else ("适当缩量" if suo_ok else "否")
-    L(f"**缩量**: {suo}  |  单针下20: {'✓' if zhen20 else '✗'}  |  洗盘异动: {'✓' if wash else '✗'}")
+    L(f"**缩量**: {suo}  |  单针下20: {'✓' if zhen20 else 'X'}  |  洗盘异动: {'✓' if wash else 'X'}")
     warns = []
     if dead: warns.append("死叉")
     if bk: warns.append("破线")
