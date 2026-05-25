@@ -11,3 +11,4 @@ Thumbs.db
 .venv/
 venv/
 .env
+*report*.md

@@ -789,6 +789,13 @@ class StockAnalyzer:
             "基础B2": 基础B2,
             "基础B3": 基础B3,
             "信号": signals,
+            # 方向性指标
+            "J_rising": (J_arr[-1] > J_arr[-2]) if len(J_arr) >= 2 else None,
+            "J_change": round(J_arr[-1] - J_arr[-2], 1) if len(J_arr) >= 2 else None,
+            "白线_rising": not 转势,
+            "黄线_rising": (大哥黄线 >= yellow_yest_val * 0.999) if yellow_yest_val else None,
+            "趋势变化": "白线上穿" if (len(ema10_full) >= 2 and
+                ema(ema10_full[:-1], 10)[-1] <= 大哥黄线 and 趋势白线 > 大哥黄线) else None,
         }
 
 

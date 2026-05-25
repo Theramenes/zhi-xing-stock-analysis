@@ -5,6 +5,13 @@
 from datetime import datetime
 
 
+def _fmt_direction(rising):
+    """方向指示器"""
+    if rising is None:
+        return ""
+    return "↑" if rising else "↓"
+
+
 def _fmt(v, precision=2):
     """数字格式化"""
     if v is None:
@@ -96,6 +103,8 @@ def _section_b1(lines, code, name, indicators):
     L("## B1 技术指标")
     L("")
     j = indicators.get("J", "?")
+    k_val = indicators.get("K", "?")
+    d_val = indicators.get("D", "?")
     rsi = indicators.get("RSI", "?")
     trend = indicators.get("趋势", "?")
     white = indicators.get("白线", "?")
@@ -115,6 +124,12 @@ def _section_b1(lines, code, name, indicators):
     dead = indicators.get("死叉", False)
     bk = indicators.get("破线", False)
     rev = indicators.get("转势", False)
+    strong_trend = indicators.get("强趋势股", False)
+    uptrend = indicators.get("做上涨趋势", False)
+    super_bull = indicators.get("超牛股", False)
+    j_rising = indicators.get("J_rising")
+    white_rising = indicators.get("白线_rising")
+    yellow_rising = indicators.get("黄线_rising")
     dist_w = indicators.get("距离白线_pct", 0)
     dist_y = indicators.get("距离黄线_pct", 0)
 
@@ -122,11 +137,17 @@ def _section_b1(lines, code, name, indicators):
     L(f"|------|------|------|")
     L(f"| 最新价 | {_fmt(last_price)} | 涨跌 {_fmt_pct(change)} |")
     j_status = "超卖" if isinstance(j, (int, float)) and j < -15 else ("低位" if isinstance(j, (int, float)) and j < 20 else ("偏高" if isinstance(j, (int, float)) and j > 80 else "正常"))
-    L(f"| J值 | {_fmt(j)} | {j_status} |")
+    j_dir = _fmt_direction(j_rising)
+    L(f"| J值 | {_fmt(j)} | {j_status} {j_dir} |")
+    L(f"| K/D | {_fmt(k_val)} / {_fmt(d_val)} | |")
     L(f"| RSI | {_fmt(rsi)} | |")
-    L(f"| 趋势 | {trend} | |")
-    L(f"| 白线/黄线 | {_fmt(white)} / {_fmt(yellow)} | 距白线 {dist_w:.1f}% / 距黄线 {dist_y:.1f}% |")
+    white_dir = _fmt_direction(white_rising)
+    yellow_dir = _fmt_direction(yellow_rising)
+    L(f"| 趋势白线 | {_fmt(white)} | {white_dir} |")
+    L(f"| 大哥黄线 | {_fmt(yellow)} | {yellow_dir} |")
+    L(f"| 趋势 | {trend} | 做上涨趋势={'✓' if uptrend else 'X'} 强趋势={'✓' if strong_trend else 'X'} 超牛={'✓' if super_bull else 'X'} |")
     L(f"| BBI | {_fmt(bbi)} | |")
+    L(f"| 距白线/黄线 | {dist_w:.1f}% / {dist_y:.1f}% | |")
     L(f"| 综合评分 | {score}/5 | |")
     L("")
 
@@ -135,9 +156,9 @@ def _section_b1(lines, code, name, indicators):
     suo = "超缩量" if suo_extreme else ("适当缩量" if suo_ok else "否")
     L(f"**缩量**: {suo}  |  单针下20: {'✓' if zhen20 else 'X'}  |  洗盘异动: {'✓' if wash else 'X'}")
     warns = []
+    if rev: warns.append("转势(白线走平/向下)")
     if dead: warns.append("死叉")
     if bk: warns.append("破线")
-    if rev: warns.append("转势")
     if warns:
         L(f"**⚠️ 风险**: {', '.join(warns)}")
     L("")
