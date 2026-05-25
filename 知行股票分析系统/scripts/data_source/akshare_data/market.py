@@ -3,6 +3,7 @@ akshare 市场数据 — 指数/板块排名/北向资金/个股资金流
 抄 zhixinglu app/data/letter_data.py get_market_overview() + get_stock_detail()
 """
 import akshare as ak
+from .rate_limiter import with_rate_limit
 
 
 def _safe_float(val):
@@ -14,6 +15,7 @@ def _safe_float(val):
         return None
 
 
+@with_rate_limit
 def get_market_overview() -> dict:
     """市场大局 — 4大指数 + 北向资金 + 领涨/领跌板块"""
     result = {}
