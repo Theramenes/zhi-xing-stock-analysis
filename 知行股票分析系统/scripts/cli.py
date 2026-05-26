@@ -768,6 +768,96 @@ def cmd_data_report(args):
         print(md)
 
 
+def cmd_industry_research(args):
+    """行业研究 — 任意输入 → LLM 总结 → 保存到 references/industry_logic/
+
+    三种模式:
+      1. --urls URL1 URL2    → 抓取URL内容 → LLM总结
+      2. --text "文章内容"    → 直接对文本做LLM总结
+      3. --stdin              → 从stdin读取（OpenClaw搜索结果传进来）
+
+    OpenClaw 工作流:
+      Claude搜索 → 收集文章内容 → python cli.py industry-research --topic PCB --stdin
+    """
+    from config.llm_config import get_llm_config
+    from llm.client import chat
+
+    config = get_llm_config()
+    if not config.available:
+        print("LLM 未配置。export ZX_LLM_API_KEY=sk-xxx")
+        return
+
+    import requests, re, os, sys
+
+    # 1. 收集内容
+    content_parts = []
+
+    # --stdin: OpenClaw 把搜索到的内容 pipe 进来
+    if args.stdin:
+        if not sys.stdin.isatty():
+            stdin_text = sys.stdin.read().strip()
+            if stdin_text:
+                content_parts.append(stdin_text)
+                print(f"  从 stdin 读取: {len(stdin_text)} chars")
+
+    if args.urls:
+        for url in args.urls:
+            try:
+                headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+                r = requests.get(url, headers=headers, timeout=30)
+                if r.status_code == 200:
+                    text = r.text
+                    text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL)
+                    text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL)
+                    text = re.sub(r'<[^>]+>', ' ', text)
+                    text = re.sub(r'\s+', ' ', text).strip()
+                    content_parts.append(f"来源: {url}\n\n{text[:6000]}")
+                    print(f"  {url[:60]}... OK ({len(text)} chars)")
+                else:
+                    print(f"  {url[:60]}... HTTP {r.status_code}")
+            except Exception as e:
+                print(f"  {url[:60]}... {e}")
+
+    if args.text:
+        content_parts.append(args.text)
+
+    if not content_parts:
+        print("无可用内容。请提供 --urls、--text 或 --stdin")
+        return
+
+    # 2. LLM 总结
+    print(f"\n[LLM] 总结 {args.topic} 行业逻辑...")
+    combined = "\n\n---\n\n".join(content_parts)
+
+    messages = [
+        {"role": "system", "content": f"""你是A股行业研究员。请从以下文章中提取{args.topic}行业的投资逻辑。
+输出格式（Markdown）：
+## {args.topic}行业逻辑
+### 一、行业现状（市场规模、增速、技术阶段）
+### 二、产业链结构（上游/中游/下游，各环节核心A股标的及代码）
+### 三、核心驱动（需求端/技术变革/政策）
+### 四、投资主线（按确定性排序）
+### 五、重点关注标的（| 代码 | 名称 | 环节 | 逻辑 |）
+### 六、风险"""},
+        {"role": "user", "content": combined},
+    ]
+
+    resp = chat(messages, max_tokens=4096)
+    if not resp:
+        print("LLM 调用失败")
+        return
+
+    # 3. 保存
+    ref_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "references", "industry_logic")
+    os.makedirs(ref_dir, exist_ok=True)
+    output_path = args.output or os.path.join(ref_dir, f"{args.topic}_行业逻辑.md")
+
+    header = f"> 自动生成 | 来源: {', '.join(args.urls or ['stdin/text'])}\n\n"
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(header + resp["content"])
+    print(f"\n已保存: {output_path}")
+
+
 def cmd_kline_analyze(args):
     """K线综合分析（LLM）"""
     from config.llm_config import get_llm_config
@@ -819,6 +909,14 @@ def cmd_kline_analyze(args):
         chain = build_chain_context(args.theme, args.symbol)
         if chain:
             theme_str = f"## 产业链: {args.theme}\n- 对标标的: {chain.get('total','?')}只\n- 该股所在环节: {chain.get('target_sub','?')}"
+        # 自动加载已保存的行业逻辑
+        try:
+            from llm.industry_research import get_industry_logic
+            logic = get_industry_logic(args.theme)
+            if logic:
+                theme_str += f"\n\n## {args.theme}行业逻辑（知识库）\n{logic[:2000]}"
+        except Exception:
+            pass
 
     verify_report = ""
     if args.verify:
@@ -1093,6 +1191,14 @@ def main():
     p_as.add_argument("--position-ratio", type=float, help="仓位(百分比)")
     p_as.add_argument("--pnl", type=float, help="总持仓盈亏")
 
+    # === 行业研究 ===
+    p_ir = sub.add_parser("industry-research", help="读取URL/文本/stdin → LLM总结行业逻辑 → 保存到 references/")
+    p_ir.add_argument("--topic", "-t", required=True, help="行业/主题名（如 PCB、机器人）")
+    p_ir.add_argument("--urls", "-u", nargs="*", help="参考URL列表")
+    p_ir.add_argument("--text", help="直接输入文本分析")
+    p_ir.add_argument("--stdin", action="store_true", help="从stdin读取（OpenClaw搜索结果pipe进来）")
+    p_ir.add_argument("--output", "-o", help="输出路径（默认 references/industry_logic/{topic}_行业逻辑.md）")
+
     # === K线综合分析 ===
     p_ka = sub.add_parser("kline-analyze", help="K线形态+基本面+题材+B1 综合分析（LLM）")
     p_ka.add_argument("--symbol", "-s", required=True, help="股票代码")
@@ -1187,6 +1293,10 @@ def main():
     # === 账户管理 ===
     elif args.command == "account-update":
         cmd_account_update(args)
+
+    # === 行业研究 ===
+    elif args.command == "industry-research":
+        cmd_industry_research(args)
 
     # === K线综合分析 ===
     elif args.command == "kline-analyze":
