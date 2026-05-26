@@ -23,6 +23,10 @@ CREATE TABLE IF NOT EXISTS stock_daily (
     low    REAL,
     close  REAL,
     volume REAL,            -- 手
+    amount REAL,            -- 成交额(元)
+    turnover REAL,          -- 换手率(%)
+    amplitude REAL,         -- 振幅(%)
+    change_pct REAL,        -- 涨跌幅(%)
     PRIMARY KEY (code, date)
 );
 
@@ -297,17 +301,18 @@ class StockDB:
 
     def upsert(self, code: str, rows: List[dict]) -> int:
         """
-        批量插入或更新。rows 格式: [{date, open, high, low, close, volume}, ...]
+        批量插入或更新。rows 格式: [{date, open, high, low, close, volume, amount, turnover, amplitude, change_pct}, ...]
         返回实际写入行数。
         """
         count = 0
         with self.conn:
             for r in rows:
                 self.conn.execute(
-                    """INSERT OR REPLACE INTO stock_daily (code, date, open, high, low, close, volume)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    """INSERT OR REPLACE INTO stock_daily (code, date, open, high, low, close, volume, amount, turnover, amplitude, change_pct)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (code, r["date"], r.get("open"), r.get("high"),
-                     r.get("low"), r.get("close"), r.get("volume"))
+                     r.get("low"), r.get("close"), r.get("volume"),
+                     r.get("amount"), r.get("turnover"), r.get("amplitude"), r.get("change_pct"))
                 )
                 count += 1
         return count
@@ -323,15 +328,17 @@ class StockDB:
     def get_candles(self, code: str, limit: int = 120) -> List[dict]:
         """取最近 N 天 K 线，返回 candles 格式"""
         rows = self.conn.execute(
-            "SELECT date, open, high, low, close, volume FROM stock_daily "
-            "WHERE code=? ORDER BY date DESC LIMIT ?",
+            "SELECT date, open, high, low, close, volume, "
+            "COALESCE(amount,0), COALESCE(turnover,0), COALESCE(amplitude,0), COALESCE(change_pct,0) "
+            "FROM stock_daily WHERE code=? ORDER BY date DESC LIMIT ?",
             (code, limit)
         ).fetchall()
         # 按日期升序返回（B1 计算器需要）
         rows.reverse()
         return [
             {"date": r[0], "open": r[1], "high": r[2],
-             "low": r[3], "close": r[4], "volume": r[5]}
+             "low": r[3], "close": r[4], "volume": r[5],
+             "amount": r[6], "turnover": r[7], "amplitude": r[8], "change_pct": r[9]}
             for r in rows
         ]
 

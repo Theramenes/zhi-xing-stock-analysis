@@ -66,6 +66,10 @@ class AkshareFetcher:
                     "low": float(row.get('最低', 0) or 0),
                     "close": float(row.get('收盘', 0) or 0),
                     "volume": vol / 100 if vol > 100000 else vol,
+                    "amount": float(row.get('成交额', 0) or 0),
+                    "turnover": float(row.get('换手率', 0) or 0),
+                    "amplitude": float(row.get('振幅', 0) or 0),
+                    "change_pct": float(row.get('涨跌幅', 0) or 0),
                 })
             return candles if candles else None
 

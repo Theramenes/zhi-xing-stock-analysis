@@ -768,6 +768,99 @@ def cmd_data_report(args):
         print(md)
 
 
+def cmd_kline_analyze(args):
+    """K线综合分析（LLM）"""
+    from config.llm_config import get_llm_config
+    config = get_llm_config()
+    if not config.available:
+        print("LLM 未配置。export ZX_LLM_API_KEY=sk-xxx")
+        return
+
+    from storage.kline_filler import ensure_candles
+    from indicators.b1_calculator import compute_single
+    from llm.kline_preprocessor import preprocess_kline
+    from llm.client import chat
+    from llm.prompts.kline_analysis import build_prompt
+    from data_source.fundamental_cascade import get_fundamentals, get_chip
+    from reporting.data_report import _fmt, _fmt_pct as fpct, _fmt_amount as famt
+
+    print(f"[Analyze] {args.symbol} K线 + B1...")
+    candles = ensure_candles(args.symbol, required_days=args.days)
+    if len(candles) < 30:
+        print(f"K线不足({len(candles)}天)")
+        return
+    ind = compute_single(args.symbol, candles)
+    name = args.name or ind.get("name", args.symbol)
+
+    print("[Analyze] 预处理K线形态...")
+    kline_ctx = preprocess_kline(candles, ind, lookback=20)
+
+    print("[Analyze] 基本面...")
+    fund = get_fundamentals(args.symbol, name)
+    fund_str = ""
+    if fund and fund.get("source") != "none":
+        fund_str = f"""## 基本面
+| 指标 | 数值 |
+|------|------|
+| 营收 | {famt(fund.get('revenue'))} | 净利润 | {famt(fund.get('net_profit'))} |
+| ROE | {fpct(fund.get('roe'))} | 毛利率 | {fpct(fund.get('gross_margin'))} |
+| 质量: {fund.get('quality',{}).get('profit_quality','?')}"""
+
+    chip = get_chip(args.symbol)
+    chip_str = ""
+    if chip:
+        chip_str = f"""## 筹码
+| 获利比例 | {chip.get('profit_ratio',0)*100:.1f}% | 成本 | {chip.get('avg_cost','?')} |
+| 90%集中度 | {chip.get('concentration_90',0)*100:.1f}% | 状态 | {chip.get('chip_status','?')} |"""
+
+    theme_str = ""
+    if args.theme:
+        from llm.market_context import build_chain_context
+        chain = build_chain_context(args.theme, args.symbol)
+        if chain:
+            theme_str = f"## 产业链: {args.theme}\n- 对标标的: {chain.get('total','?')}只\n- 该股所在环节: {chain.get('target_sub','?')}"
+
+    verify_report = ""
+    if args.verify:
+        print("[Analyze] 交叉验证K线...")
+        from data_source.kline_verifier import KlineVerifier
+        verifier = KlineVerifier()
+        from datetime import datetime, timedelta
+        end = datetime.now().strftime("%Y-%m-%d")
+        start = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        v = verifier.verify(args.symbol, start, end, candles)
+        if v.get("match") is not None:
+            status = "✅ 一致" if v["match"] else f"⚠️ {len(v.get('discrepancies',[]))}处差异"
+            verify_report = f"""## K线交叉验证 ({v.get('source','?')})
+| 指标 | 数值 |
+|------|------|
+| 对比源 | {v.get('source','?')} |
+| 共同日期 | {v.get('common_dates','?')}天 |
+| 收盘价相关系数 | {v.get('correlation','?')} |
+| 平均价差 | {v.get('avg_close_diff','?')}% |
+| 结论 | {status} |"""
+            if v.get("discrepancies"):
+                verify_report += "\n### 差异明细\n| 日期 | 类型 | 主源 | 备源 | 差异% |\n|------|------|------|------|-------|\n"
+                for d in v["discrepancies"][:5]:
+                    verify_report += f"| {d['date']} | {d['type']} | {d['primary']} | {d['secondary']} | {d['diff_pct']}% |\n"
+        else:
+            verify_report = "## K线交叉验证\n*无可用的备选验证源*"
+
+    print("[Analyze] LLM 分析中...")
+    messages = build_prompt(name, args.symbol, kline_ctx, fund_str, theme_str, chip_ctx=chip_str, news_ctx=verify_report)
+    resp = chat(messages, max_tokens=4096)
+    if resp:
+        md = f"# {name}({args.symbol}) K线综合分析\n\n{resp['content']}\n\n---\n*模型: {resp['model']} | tokens: {resp['tokens_in']}/{resp['tokens_out']}*"
+        if args.output:
+            with open(args.output, 'w', encoding='utf-8') as f:
+                f.write(md)
+            print(f"已保存到 {args.output}")
+        else:
+            print(md)
+    else:
+        print("LLM 调用失败")
+
+
 def cmd_sector_report(args):
     """板块扫描数据报告"""
     from scanning.sector_scanner import SectorOverview, SectorB1Scanner
@@ -1000,6 +1093,15 @@ def main():
     p_as.add_argument("--position-ratio", type=float, help="仓位(百分比)")
     p_as.add_argument("--pnl", type=float, help="总持仓盈亏")
 
+    # === K线综合分析 ===
+    p_ka = sub.add_parser("kline-analyze", help="K线形态+基本面+题材+B1 综合分析（LLM）")
+    p_ka.add_argument("--symbol", "-s", required=True, help="股票代码")
+    p_ka.add_argument("--name", help="股票名称")
+    p_ka.add_argument("--theme", help="题材/产业链名")
+    p_ka.add_argument("--days", type=int, default=114, help="K线天数")
+    p_ka.add_argument("--verify", action="store_true", help="双源交叉验证K线数据")
+    p_ka.add_argument("--output", "-o", help="报告输出路径")
+
     # === Phase G: 数据报告 ===
     p_dr = sub.add_parser("data-report", help="个股完整数据报告（B1+基本面+估值+消息+板块+市场）")
     p_dr.add_argument("--symbol", "-s", required=True, help="股票代码")
@@ -1085,6 +1187,10 @@ def main():
     # === 账户管理 ===
     elif args.command == "account-update":
         cmd_account_update(args)
+
+    # === K线综合分析 ===
+    elif args.command == "kline-analyze":
+        cmd_kline_analyze(args)
 
     # === Phase G: 数据报告 ===
     elif args.command == "data-report":
