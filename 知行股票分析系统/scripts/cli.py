@@ -768,6 +768,39 @@ def cmd_data_report(args):
         print(md)
 
 
+def cmd_industry_rebuild(args):
+    from config.industry_index import rebuild_ths_index, rebuild_em_index
+    if args.source == "ths":
+        rebuild_ths_index()
+    else:
+        rebuild_em_index()
+
+
+def cmd_industry_lookup(args):
+    from config.industry_index import get_tags, get_stocks_by_industry, search_industry, get_industry_path
+    if args.search:
+        results = search_industry(args.search, args.source)
+        print(f"搜索 '{args.search}' ({args.source}): {len(results)} 个匹配")
+        for r in results[:20]:
+            stocks = get_stocks_by_industry(r, args.source)
+            print(f"  {r}: {len(stocks)} 只")
+        return
+    if args.code:
+        tags = get_tags(args.code, args.source)
+        path = get_industry_path(args.code, args.source)
+        print(f"{args.code} ({args.source}):")
+        print(f"  标签: {', '.join(tags) if tags else '(无)'}")
+        print(f"  路径: {path}")
+        return
+    if args.name:
+        stocks = get_stocks_by_industry(args.name, args.source)
+        print(f"'{args.name}' ({args.source}): {len(stocks)} 只")
+        for s in stocks[:15]:
+            print(f"  {s}")
+        return
+    print("请指定 --code / --name / --search")
+
+
 def cmd_industry_research(args):
     """行业研究 — 任意输入 → LLM 总结 → 保存到 references/industry_logic/
 
@@ -1191,6 +1224,16 @@ def main():
     p_as.add_argument("--position-ratio", type=float, help="仓位(百分比)")
     p_as.add_argument("--pnl", type=float, help="总持仓盈亏")
 
+    # === 行业分类索引 ===
+    p_irb = sub.add_parser("industry-rebuild", help="重建行业分类索引（同花顺/东方财富）")
+    p_irb.add_argument("--source", "-s", required=True, choices=["ths", "em"],
+                        help="ths=同花顺(iFind) / em=东方财富(akshare)")
+    p_il = sub.add_parser("industry-lookup", help="查询行业标签（个股→行业 / 行业→成分股）")
+    p_il.add_argument("--code", "-c", help="股票代码（查该股行业标签）")
+    p_il.add_argument("--name", "-n", help="行业名（查该行业成分股）")
+    p_il.add_argument("--source", choices=["ths", "em"], default="ths", help="分类体系")
+    p_il.add_argument("--search", help="模糊搜索行业名")
+
     # === 行业研究 ===
     p_ir = sub.add_parser("industry-research", help="读取URL/文本/stdin → LLM总结行业逻辑 → 保存到 references/")
     p_ir.add_argument("--topic", "-t", required=True, help="行业/主题名（如 PCB、机器人）")
@@ -1293,6 +1336,12 @@ def main():
     # === 账户管理 ===
     elif args.command == "account-update":
         cmd_account_update(args)
+
+    # === 行业分类索引 ===
+    elif args.command == "industry-rebuild":
+        cmd_industry_rebuild(args)
+    elif args.command == "industry-lookup":
+        cmd_industry_lookup(args)
 
     # === 行业研究 ===
     elif args.command == "industry-research":

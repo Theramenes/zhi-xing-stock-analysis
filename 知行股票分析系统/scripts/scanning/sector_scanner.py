@@ -223,16 +223,7 @@ class SectorB1Scanner:
         overview_result = ov.scan(query)
 
         # 2. 拿成分股 + 黑名单过滤
-        ifind = ds_registry.get_source("ifind")
-        if not ifind or not ifind.is_available():
-            return {"overview": overview_result, "b1": None, "banned": []}
-
-        if stype == 'industry':
-            searchstring = f"{name}行业"
-        else:
-            searchstring = f"{name}概念"
-
-        members = self._get_members(ifind, searchstring)
+        members = self._get_members(name, stype)
         if not members:
             return {"overview": overview_result, "b1": None, "banned": []}
 
@@ -246,21 +237,74 @@ class SectorB1Scanner:
         result = self._scan_stocks(kept, name, days)
         return {"overview": overview_result, "b1": result, "banned": [s.code for s in banned]}
 
-    def _get_members(self, ifind, searchstring: str) -> List[StockInfo]:
-        """获取成分股列表"""
-        members = ifind.get_sector_members(searchstring)
-        if not members:
-            payload = json.dumps({"searchstring": f"{searchstring} 成分股 股票代码 股票简称", "searchtype": "stock"}, ensure_ascii=False)
-            data = ifind._call("endpoint-call", "--name", "a_share_common_query", "--payload", payload, timeout=60)
-            if data and data.get("ok"):
-                tables = data.get("data", {}).get("tables", [])
-                if tables:
-                    tb = tables[0].get("table", {})
-                    codes = tb.get("股票代码", [])
-                    names = tb.get("股票简称", [])
-                    members = [StockInfo(code=str(codes[i]).split('.')[0], name=str(names[i]))
-                               for i in range(min(len(codes), len(names)))]
-        return members
+    def _get_members(self, sector_name: str, stype: str = "industry") -> List[StockInfo]:
+        """获取成分股列表 — 本地索引 → iFind → freeStockLine → akshare"""
+        # 0. 本地行业索引（同花顺优先，东财富降级）
+        for src in ["ths", "em"]:
+            try:
+                from config.industry_index import get_stocks_by_industry, get_stock_name
+                codes = get_stocks_by_industry(sector_name, source=src)
+                if codes:
+                    members = []
+                    for c in codes:
+                        members.append(StockInfo(code=c, name=get_stock_name(c, src) or c))
+                    print(f"  [index:{src}] {sector_name}: {len(members)} 只")
+                    return members
+            except Exception:
+                pass
+
+        # 1. iFind
+        ifind = ds_registry.get_source("ifind")
+        if ifind and ifind.is_available():
+            searchstring = f"{sector_name}{'行业' if stype == 'industry' else '概念'}"
+            members = ifind.get_sector_members(searchstring)
+            if members:
+                return members
+            # iFind fallback: a_share_common_query
+            try:
+                payload = json.dumps(
+                    {"searchstring": f"{searchstring} 成分股 股票代码 股票简称", "searchtype": "stock"},
+                    ensure_ascii=False)
+                data = ifind._call("endpoint-call", "--name", "a_share_common_query", "--payload", payload, timeout=30)
+                if data and data.get("ok"):
+                    tables = data.get("data", {}).get("tables", [])
+                    if tables:
+                        tb = tables[0].get("table", {})
+                        codes = tb.get("股票代码", [])
+                        names = tb.get("股票简称", [])
+                        return [StockInfo(code=str(codes[i]).split('.')[0], name=str(names[i]))
+                                for i in range(min(len(codes), len(names)))]
+            except Exception:
+                pass
+
+        # 2. freeStockLine
+        free = ds_registry.get_source("free")
+        if free and free.is_available():
+            try:
+                members = free.get_sector_members(sector_name)
+                if members:
+                    return members
+            except Exception:
+                pass
+
+        # 3. akshare
+        try:
+            import akshare as ak
+            import time, random
+            time.sleep(random.uniform(1, 3))
+            if stype == "industry":
+                df = ak.stock_board_industry_cons_em(symbol=sector_name)
+            else:
+                df = ak.stock_board_concept_cons_em(symbol=sector_name)
+            if df is not None and not df.empty:
+                code_col = "代码" if "代码" in df.columns else df.columns[0]
+                name_col = "名称" if "名称" in df.columns else df.columns[1]
+                return [StockInfo(code=str(row[code_col]), name=str(row[name_col]))
+                        for _, row in df.iterrows()]
+        except Exception:
+            pass
+
+        return []
 
     def _scan_stocks(self, members: List[StockInfo], sector_name: str, days: int) -> SectorB1Result:
         """对已过滤的股票列表执行 K线+B1扫描"""
@@ -270,7 +314,7 @@ class SectorB1Scanner:
         total = len(members)
 
         # 并行取K线
-        print(f"[B1-2/5] iFind K线 ({self.workers}线程)...")
+        print(f"[B1-2/5] 取K线 ({self.workers}线程)...")
         kline_map = {}
         errors = []
         done = 0

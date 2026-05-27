@@ -142,30 +142,16 @@ def build_sector_context(sector_name: str, target_code: str = None) -> dict | No
 
 
 def _get_sector_rank(sector_name: str) -> str:
-    """获取板块在行业中的排名"""
-    ifind = ds_registry.get_source("ifind")
-    if not ifind or not ifind.is_available():
-        return "?"
+    """获取板块排名 — SectorCascade (iFind→efinance→akshare)"""
     try:
-        payload = json.dumps(
-            {"searchstring": "行业板块涨跌幅排行", "searchtype": "plate"},
-            ensure_ascii=False,
-        )
-        data = ifind._call("endpoint-call", "--name", "a_share_common_query",
-                           "--payload", payload, timeout=30)
-        if not data or not data.get("ok"):
-            return "?"
-        tables = data.get("data", {}).get("tables", [])
-        if not tables:
-            return "?"
-        tb = tables[0].get("table", {})
-        names = [str(n) for n in tb.get("板块名称", [])]
-        changes = tb.get("涨跌幅", [])
-        for i, n in enumerate(names):
-            if sector_name[:3] in n or n in sector_name:
-                chg = changes[i] if i < len(changes) else 0
-                return f"第{i+1}名 / 共{len(names)}个行业 (涨跌{chg})"
-        return f"未进入排行榜前{len(names)}"
+        from data_source.sector_cascade import SectorCascade
+        sc = SectorCascade()
+        rankings = sc.get_sector_rankings()
+        all_sectors = rankings.get("top", []) + rankings.get("bottom", [])
+        for i, s in enumerate(all_sectors):
+            if sector_name[:3] in s.get("name", "") or s.get("name", "") in sector_name:
+                return f"排名{i+1} 涨跌{s.get('change_pct',0):+.2f}% (源:{rankings.get('source','?')})"
+        return f"共{len(all_sectors)}个行业 (源:{rankings.get('source','?')})"
     except Exception:
         return "?"
 
@@ -193,37 +179,29 @@ def _avg_change(overview) -> float:
 
 
 def _get_market_snapshot() -> dict:
-    """市场快照：领涨板块 + 市场宽度"""
-    ifind = ds_registry.get_source("ifind")
-    if not ifind or not ifind.is_available():
-        return {"top_sectors": "?", "market_breadth": "?"}
+    """市场快照：领涨板块 + 市场宽度 — sector_cascade + akshare_data.market"""
     try:
-        payload = json.dumps(
-            {"searchstring": "行业板块涨跌幅排行", "searchtype": "plate"},
-            ensure_ascii=False,
-        )
-        data = ifind._call("endpoint-call", "--name", "a_share_common_query",
-                           "--payload", payload, timeout=30)
-        if not data or not data.get("ok"):
-            return {"top_sectors": "?", "market_breadth": "?"}
-        tables = data.get("data", {}).get("tables", [])
-        if not tables:
-            return {"top_sectors": "?", "market_breadth": "?"}
-        tb = tables[0].get("table", {})
-        names = [str(n) for n in tb.get("板块名称", [])]
-        changes = tb.get("涨跌幅", [])
-        top5 = []
-        up_count = 0
-        for i in range(min(15, len(names))):
-            chg = changes[i] if i < len(changes) else 0
-            if isinstance(chg, (int, float)) and chg > 0:
-                up_count += 1
-            if i < 5:
-                top5.append(f"{names[i]}({chg:+.1f}%)" if isinstance(chg, (int, float)) else f"{names[i]}")
-        breadth = f"前15行业 {up_count}涨/{15-up_count}跌"
-        return {
-            "top_sectors": "、".join(top5),
-            "market_breadth": breadth,
-        }
+        from data_source.sector_cascade import SectorCascade
+        sc = SectorCascade()
+        rankings = sc.get_sector_rankings()
+        top = rankings.get("top", [])
+        if top:
+            top5_str = "、".join(f"{s['name']}({s['change_pct']:+.1f}%)" for s in top[:5])
+            up_count = sum(1 for s in top if s.get("change_pct", 0) > 0)
+            return {
+                "top_sectors": top5_str,
+                "market_breadth": f"前{len(top)}行业 {up_count}涨/{len(top)-up_count}跌 (源:{rankings.get('source','?')})",
+            }
     except Exception:
-        return {"top_sectors": "?", "market_breadth": "?"}
+        pass
+    # fallback: akshare market.py
+    try:
+        from data_source.akshare_data.market import get_market_overview
+        mk = get_market_overview()
+        top = mk.get("领涨板块", [])
+        if top:
+            top5_str = "、".join(f"{p['板块名称']}({p.get('涨跌幅',0):+.1f}%)" for p in top[:5])
+            return {"top_sectors": top5_str, "market_breadth": f"akshare"}
+    except Exception:
+        pass
+    return {"top_sectors": "?", "market_breadth": "?"}
