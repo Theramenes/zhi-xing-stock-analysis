@@ -130,6 +130,10 @@ def _section_b1(lines, code, name, indicators):
     j_rising = indicators.get("J_rising")
     white_rising = indicators.get("白线_rising")
     yellow_rising = indicators.get("黄线_rising")
+    white_cross = indicators.get("白线上穿黄线")
+    white_cross_trend = indicators.get("白线上穿趋势")
+    white_slope = indicators.get("白线斜率")
+    yellow_slope = indicators.get("黄线斜率")
     dist_w = indicators.get("距离白线_pct", 0)
     dist_y = indicators.get("距离黄线_pct", 0)
 
@@ -143,9 +147,14 @@ def _section_b1(lines, code, name, indicators):
     L(f"| RSI | {_fmt(rsi)} | |")
     white_dir = _fmt_direction(white_rising)
     yellow_dir = _fmt_direction(yellow_rising)
-    L(f"| 趋势白线 | {_fmt(white)} | {white_dir} |")
-    L(f"| 大哥黄线 | {_fmt(yellow)} | {yellow_dir} |")
-    L(f"| 趋势 | {trend} | 做上涨趋势={'✓' if uptrend else 'X'} 强趋势={'✓' if strong_trend else 'X'} 超牛={'✓' if super_bull else 'X'} |")
+    L(f"| 趋势白线 | {_fmt(white)} | {white_dir} (斜率{white_slope}) |" if white_slope else f"| 趋势白线 | {_fmt(white)} | {white_dir} |")
+    L(f"| 大哥黄线 | {_fmt(yellow)} | {yellow_dir} (斜率{yellow_slope}) |" if yellow_slope else f"| 大哥黄线 | {_fmt(yellow)} | {yellow_dir} |")
+    cross_str = ""
+    if white_cross:
+        cross_str = " ⚡白线上穿黄线(趋势反转信号)"
+    elif white_cross_trend:
+        cross_str = " ⚡白线上穿(备选检测)"
+    L(f"| 趋势 | {trend} | 做上涨趋势={'✓' if uptrend else 'X'} 强趋势={'✓' if strong_trend else 'X'} 超牛={'✓' if super_bull else 'X'}{cross_str} |")
     L(f"| BBI | {_fmt(bbi)} | |")
     L(f"| 距白线/黄线 | {dist_w:.1f}% / {dist_y:.1f}% | |")
     L(f"| 综合评分 | {score}/5 | |")

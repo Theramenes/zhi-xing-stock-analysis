@@ -742,6 +742,16 @@ class StockAnalyzer:
 
         trend = "多头" if 趋势白线 > 大哥黄线 else "空头"
 
+        # 预计算白线/黄线全序列用于 CROSS 上穿检测
+        _white_arr = ema(ema10_full, 10)
+        _yellow_arr = []
+        for i in range(len(C)):
+            m14_i = ma(C[:i+1], 14) or 0
+            m28_i = ma(C[:i+1], 28) or 0
+            m57_i = ma(C[:i+1], 57) or 0
+            m114_i = ma(C[:i+1], 114) or 0
+            _yellow_arr.append((m14_i + m28_i + m57_i + m114_i) / 4 if (m14_i + m28_i + m57_i + m114_i) > 0 else 0)
+
         return {
             "code": self.code,
             "last": round(C[-1], 2),
@@ -794,8 +804,10 @@ class StockAnalyzer:
             "J_change": round(J_arr[-1] - J_arr[-2], 1) if len(J_arr) >= 2 else None,
             "白线_rising": not 转势,
             "黄线_rising": (大哥黄线 >= yellow_yest_val * 0.999) if yellow_yest_val else None,
-            "趋势变化": "白线上穿" if (len(ema10_full) >= 2 and
-                ema(ema10_full[:-1], 10)[-1] <= 大哥黄线 and 趋势白线 > 大哥黄线) else None,
+            # CROSS(白线, 黄线): 前一日白<=黄 且 今日白>黄
+            "白线上穿黄线": cross(_white_arr, _yellow_arr) if len(_white_arr) >= 2 and len(_yellow_arr) >= 2 else None,
+            "白线斜率": round(趋势白线 - 白线_prev, 2) if 白线_prev else None,
+            "黄线斜率": round(大哥黄线 - yellow_yest_val, 2) if yellow_yest_val else None,
         }
 
 
