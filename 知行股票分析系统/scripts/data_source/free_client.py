@@ -1,16 +1,82 @@
 """
 免费数据源客户端 — 纯 Python 实现，无外部 CLI 依赖
 通过 efinance / akshare 获取数据，返回标准化 DataResponse
+
+防爬策略：随机休眠(1-5s) + 简单内存缓存(60s TTL) + User-Agent 轮换
 """
+import random
+import time
+from functools import wraps
 from typing import List, Optional
 
 from .base import DataSource, DataRequest, DataResponse, Candle, SectorInfo, StockInfo
+
+# ============================================================
+# 防爬层
+# ============================================================
+
+_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
+]
+
+_CACHE = {}
+
+
+def _rate_limit(min_sleep: float = 1.5, max_sleep: float = 5.0):
+    """随机休眠装饰器"""
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            time.sleep(random.uniform(min_sleep, max_sleep))
+            return fn(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+def _cached(ttl_seconds: float = 60.0):
+    """简单内存缓存装饰器"""
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            key = f"{fn.__name__}:{args}:{kwargs}"
+            now = time.time()
+            if key in _CACHE:
+                value, expire = _CACHE[key]
+                if now < expire:
+                    return value
+            result = fn(*args, **kwargs)
+            _CACHE[key] = (result, now + ttl_seconds)
+            return result
+        return wrapper
+    return decorator
+
+
+def _set_random_ua():
+    """为 akshare / requests 设置随机 User-Agent"""
+    try:
+        import requests
+        requests.utils.default_user_agent = lambda: random.choice(_USER_AGENTS)
+    except Exception:
+        pass
 
 
 class FreeClient(DataSource):
     """免费数据源（efinance / akshare 内嵌，无 CLI 依赖）"""
 
     name = "free"
+
+    def __init__(self):
+        self._last_call = 0.0
+
+    def _throttle(self, min_interval: float = 2.0):
+        """强制两次请求之间至少间隔 min_interval 秒"""
+        elapsed = time.time() - self._last_call
+        if elapsed < min_interval:
+            time.sleep(min_interval - elapsed + random.uniform(0.5, 1.5))
+        self._last_call = time.time()
 
     def is_available(self) -> bool:
         """只要 efinance 或 akshare 有一个可用即可"""
@@ -120,9 +186,12 @@ class FreeClient(DataSource):
 
     def get_sector_list(self, kind: str = "industry") -> List[SectorInfo]:
         """板块排名，优先 efinance，降级 akshare"""
+        self._throttle(min_interval=3.0)
+        _set_random_ua()
         result = self._try_efinance_sectors()
         if result:
             return result
+        self._throttle(min_interval=3.0)
         return self._try_akshare_sectors()
 
     def _try_efinance_sectors(self) -> Optional[List[SectorInfo]]:
@@ -131,9 +200,10 @@ class FreeClient(DataSource):
             df = ef.stock.get_realtime_quotes(["行业板块"])
             if df is None or df.empty:
                 return None
+            # efinance 返回的行业板块 DataFrame 中，板块名称列名为"股票名称"
             return [
                 SectorInfo(
-                    name=str(r.get("板块名称", "")),
+                    name=str(r.get("股票名称", "")),
                     change_pct=float(r.get("涨跌幅", 0)) if r.get("涨跌幅") else 0
                 )
                 for _, r in df.iterrows()
