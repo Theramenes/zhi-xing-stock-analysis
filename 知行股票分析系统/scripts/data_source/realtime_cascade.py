@@ -50,24 +50,13 @@ class RealtimeCascade:
         if ifind.is_available():
             def fn(code):
                 try:
-                    payload = json.dumps({"searchstring": f"{code} 最新价 涨跌幅 量比 换手率 市盈率 市净率 总市值 流通市值", "searchtype": "stock"}, ensure_ascii=False)
-                    data = ifind._call("endpoint-call", "--name", "a_share_common_query", "--payload", payload, timeout=15)
-                    if not data or not data.get("ok"):
+                    resp = ifind.get_realtime_ohlcv(code)
+                    if not resp or not resp.candles:
                         return None
-                    tables = data.get("data", {}).get("tables", [])
-                    if not tables:
-                        return None
-                    tb = tables[0].get("table", {})
-                    idx = len(list(tb.values())[0]) - 1 if tb else -1
+                    c = resp.candles[-1]
                     return {
-                        "price": _get(tb, ["最新价"], idx),
-                        "change_pct": _get(tb, ["涨跌幅"], idx),
-                        "volume_ratio": _get(tb, ["量比"], idx),
-                        "turnover_rate": _get(tb, ["换手率"], idx),
-                        "pe": _get(tb, ["市盈率"], idx),
-                        "pb": _get(tb, ["市净率"], idx),
-                        "total_mv": _get(tb, ["总市值"], idx),
-                        "circ_mv": _get(tb, ["流通市值"], idx),
+                        "price": c.close,
+                        "change_pct": c.change_pct if hasattr(c, "change_pct") else None,
                     }
                 except Exception:
                     return None

@@ -110,6 +110,27 @@ def generate_holdings_letter(holdings_data: list) -> str | None:
     return f"# 持仓日报 — {date_str}\n\n{content}\n"
 
 
+def generate_holdings_review(raw_data: dict) -> str | None:
+    """
+    持仓复盘/监控报告
+    raw_data: {"mode": "review"|"monitor", "date": ..., "active": [...], "closed": [...], ...}
+    Returns: 完整 Markdown 文档，或 None
+    """
+    date_str = raw_data.get("date", datetime.now().strftime("%Y-%m-%d"))
+    mode = raw_data.get("mode", "review")
+    messages = __import__("llm.prompts.holdings_review", fromlist=["build_prompt"]).build_prompt(raw_data)
+    content = _run_llm(messages, "holdings_review", None, {
+        "mode": mode,
+        "date": date_str,
+        "active_count": len(raw_data.get("active", [])),
+        "closed_count": len(raw_data.get("closed", [])),
+    })
+    if not content:
+        return None
+    title = "持仓复盘" if mode == "review" else "持仓监控"
+    return f"# {title} — {date_str}\n\n{content}\n"
+
+
 def generate_watchlist_report(watchlist_changes: dict) -> str | None:
     """
     关注列表监控报告

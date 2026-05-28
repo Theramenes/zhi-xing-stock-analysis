@@ -77,6 +77,30 @@ CREATE INDEX IF NOT EXISTS idx_tx_code ON trade_record(code);
 CREATE INDEX IF NOT EXISTS idx_tx_date ON trade_record(trade_date);
 
 -- ============================================================
+-- 持仓归档（清仓后保留，用于复刻历史持仓视图）
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS position_archive (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    code            TEXT NOT NULL,
+    name            TEXT,
+    avg_cost        REAL,                -- 清仓前最终加权成本
+    total_qty       INTEGER,             -- 清仓前总股数
+    available_qty   INTEGER,
+    first_buy_date  TEXT,                -- 首次买入日期
+    last_trade_date TEXT,                -- 最后交易日期
+    closed_date     TEXT,                -- 清仓日期
+    closed_price    REAL,                -- 清仓成交价（最后一笔）
+    realized_pnl    REAL,                -- 总实现盈亏
+    realized_pnl_pct REAL,               -- 总实现盈亏比例
+    strategy        TEXT,
+    notes           TEXT,
+    created_at      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pa_code ON position_archive(code);
+CREATE INDEX IF NOT EXISTS idx_pa_closed_date ON position_archive(closed_date);
+
+-- ============================================================
 -- 账户快照
 -- ============================================================
 

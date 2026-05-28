@@ -95,11 +95,70 @@ def list_positions(status: str = None) -> List[dict]:
     return [dict(zip(cols, r)) for r in rows]
 
 
+def list_positions_with_archive(date: str = None, include_active: bool = True) -> List[dict]:
+    """返回持仓视图：当前持仓 + 指定日期已归档的持仓。
+    若 date 为空，返回所有（含历史归档）。
+    每条记录会带上 status: 'active' | 'closed'。"""
+    db = _ensure_db()
+    results = []
+
+    if include_active:
+        rows = db.conn.execute("SELECT * FROM position ORDER BY code").fetchall()
+        cols = [c[1] for c in db.conn.execute("PRAGMA table_info(position)").fetchall()]
+        for r in rows:
+            d = dict(zip(cols, r))
+            d["status"] = "active"
+            results.append(d)
+
+    sql = "SELECT * FROM position_archive"
+    params = []
+    if date:
+        sql += " WHERE closed_date = ?"
+        params.append(date)
+    sql += " ORDER BY closed_date DESC, code"
+    rows = db.conn.execute(sql, params).fetchall()
+    cols = [c[1] for c in db.conn.execute("PRAGMA table_info(position_archive)").fetchall()]
+    for r in rows:
+        d = dict(zip(cols, r))
+        d["status"] = "closed"
+        results.append(d)
+
+    return results
+
+
 def delete_position(code: str) -> bool:
     db = _ensure_db()
     db.conn.execute("DELETE FROM position WHERE code=?", (code,))
     db.conn.commit()
     return True
+
+
+def archive_position(code: str, closed_price: float = 0, realized_pnl: float = None,
+                     realized_pnl_pct: float = None, closed_date: str = None) -> bool:
+    """将当前持仓归档到 position_archive，保留已清仓记录供日后查询。"""
+    db = _ensure_db()
+    pos = get_position(code)
+    if not pos:
+        return False
+    try:
+        now = _now_ts()
+        cd = closed_date or _now()
+        db.conn.execute(
+            """INSERT INTO position_archive
+               (code, name, avg_cost, total_qty, available_qty, first_buy_date,
+                last_trade_date, closed_date, closed_price, realized_pnl,
+                realized_pnl_pct, strategy, notes, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (pos.get("code"), pos.get("name"), pos.get("avg_cost"),
+             pos.get("total_qty"), pos.get("available_qty"),
+             pos.get("first_buy_date"), pos.get("last_trade_date"),
+             cd, closed_price, realized_pnl, realized_pnl_pct,
+             pos.get("strategy"), pos.get("notes"), now)
+        )
+        db.conn.commit()
+        return True
+    except Exception:
+        return False
 
 
 def snapshot_position(code: str, name: str = "", qty: int = 0, avg_cost: float = 0,
@@ -170,6 +229,8 @@ def add_transaction(code: str, trade_date: str, direction: str, qty: int, price:
         tx_id = cur.lastrowid
 
         if new_qty <= 0:
+            archive_position(code, closed_price=price, realized_pnl=_pnl,
+                             realized_pnl_pct=_pnl_pct, closed_date=trade_date)
             db.conn.execute("DELETE FROM position WHERE code=?", (code,))
             _audit("position", code, "DELETE", json.dumps(pos), None, f"{direction}清仓")
         else:
@@ -227,6 +288,93 @@ def get_pnl_summary(days: int = 30) -> dict:
         (start,)
     ).fetchone()
     return {"trades": row[0], "total_pnl": round(row[1] or 0, 2), "avg_pnl_pct": round(row[2] or 0, 2)}
+
+
+def get_position_adjustment_summary(code: str, date: str = None) -> dict:
+    """返回某股票在某日的调仓摘要：开盘持仓、收盘持仓、买卖数量、成本变化。
+    用于复刻截图中的"从 400 股 → 600 股，成本升至 14.02"这类调仓对比。"""
+    db = _ensure_db()
+    date = date or _now()
+    rows = db.conn.execute(
+        """SELECT direction, qty, price, avg_cost_after, balance_qty, pnl
+           FROM trade_record WHERE code=? AND trade_date=? ORDER BY id""",
+        (code, date)
+    ).fetchall()
+    if not rows:
+        return {}
+
+    first = rows[0]
+    last = rows[-1]
+
+    # 反推开盘持仓（第一笔交易前）
+    if first[0] in ("buy", "t_buy"):
+        start_qty = first[4] - first[1]
+    else:
+        start_qty = first[4] + first[1]
+
+    close_qty = last[4]
+    buys = sum(r[1] for r in rows if r[0] in ("buy", "t_buy"))
+    sells = sum(r[1] for r in rows if r[0] in ("sell", "t_sell", "clear"))
+    realized_pnl = sum(r[5] for r in rows if r[5] is not None)
+
+    # 找昨天的收盘成本作为 old_cost
+    prev = db.conn.execute(
+        """SELECT avg_cost_after FROM trade_record
+           WHERE code=? AND trade_date < ? ORDER BY trade_date DESC, id DESC LIMIT 1""",
+        (code, date)
+    ).fetchone()
+    old_cost = prev[0] if prev else None
+    new_cost = last[3] if close_qty > 0 else None
+
+    action = "不变"
+    if close_qty <= 0 and sells > 0:
+        action = "清仓"
+    elif buys > 0 and sells == 0:
+        action = "加仓"
+    elif sells > 0 and buys == 0 and close_qty > 0:
+        action = "减仓"
+    elif buys > 0 and sells > 0:
+        action = "调仓"
+
+    return {
+        "code": code,
+        "date": date,
+        "action": action,
+        "start_qty": start_qty,
+        "close_qty": close_qty,
+        "buy_qty": buys,
+        "sell_qty": sells,
+        "old_cost": old_cost,
+        "new_cost": new_cost,
+        "realized_pnl": round(realized_pnl, 2),
+    }
+
+
+def get_daily_position_changes(date: str = None) -> List[dict]:
+    """生成某日持仓变动小结：加仓/减仓/清仓/不变。
+    基于当日交易流水反推。当天无交易但仍有持仓的标的不在此列表（视为不变）。"""
+    db = _ensure_db()
+    date = date or _now()
+    rows = db.conn.execute(
+        """SELECT code, name, direction, qty, price, avg_cost_after, balance_qty, pnl
+           FROM trade_record WHERE trade_date=? ORDER BY id""",
+        (date,)
+    ).fetchall()
+
+    from collections import defaultdict
+    code_txs = defaultdict(list)
+    for r in rows:
+        code_txs[r[0]].append({
+            "name": r[1], "direction": r[2], "qty": r[3],
+            "price": r[4], "avg_cost_after": r[5], "balance_qty": r[6], "pnl": r[7]
+        })
+
+    changes = []
+    for code, txs in code_txs.items():
+        summary = get_position_adjustment_summary(code, date)
+        if summary:
+            changes.append(summary)
+    return changes
 
 
 # ============================================================

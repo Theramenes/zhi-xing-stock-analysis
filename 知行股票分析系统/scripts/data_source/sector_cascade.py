@@ -43,28 +43,9 @@ class SectorCascade:
         yield from self._try_akshare()
 
     def _try_ifind(self):
-        from data_source.ifind_client import IFindClient
-        ifind = IFindClient()
-        if not ifind.is_available():
-            return
-        def fn():
-            payload = json.dumps({"searchstring": "行业板块涨跌幅排行", "searchtype": "plate"}, ensure_ascii=False)
-            data = ifind._call("endpoint-call", "--name", "a_share_common_query", "--payload", payload, timeout=30)
-            if not data or not data.get("ok"):
-                return None
-            tables = data.get("data", {}).get("tables", [])
-            if not tables:
-                return None
-            tb = tables[0].get("table", {})
-            names = [str(n) for n in tb.get("板块名称", [])]
-            changes = tb.get("涨跌幅", [])
-            all_sectors = []
-            for i in range(min(len(names), len(changes))):
-                all_sectors.append({"name": names[i], "change_pct": _safe(changes[i]) if i < len(changes) else 0})
-            top = sorted(all_sectors, key=lambda x: x["change_pct"] or 0, reverse=True)[:10]
-            bottom = sorted(all_sectors, key=lambda x: x["change_pct"] or 0)[:10]
-            return {"top": top, "bottom": bottom}
-        yield ("ifind", fn)
+        """iFind 板块数据暂时跳过，依赖已移除的 CLI 接口。
+        板块排名完全由 efinance / akshare 覆盖。"""
+        return
 
     def _try_efinance(self):
         try:

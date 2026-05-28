@@ -1,7 +1,7 @@
 """
 K线多源级联管理器 — 对标 JusticePlutus DataFetcherManager
 
-级联链: iFind → Efinance → Akshare → FreeStockLine → Baostock → SQLite
+级联链: iFind(HTTP) → Efinance → Akshare → Baostock → SQLite
 用法:
     cascade = KlineCascade()
     candles, source = cascade.get_kline("002460", days=120)
@@ -17,7 +17,6 @@ from typing import Optional, List, Tuple, Dict
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data_source.ifind_client import IFindClient
-from data_source.free_client import FreeClient
 from data_source.fetchers.efinance_fetcher import EfinanceFetcher
 from data_source.fetchers.akshare_fetcher import AkshareFetcher
 from data_source.fetchers.baostock_fetcher import BaostockFetcher
@@ -56,13 +55,6 @@ class KlineCascade:
             self._sources.append(("akshare", ak, 2))
         else:
             print("  [info]akshare 未安装，跳过")
-
-        # freeStockLine
-        free = FreeClient()
-        if free.is_available():
-            self._sources.append(("free", free, 3))
-        else:
-            print("  [info]freeStockLine CLI 路径不存在，跳过")
 
         bs = BaostockFetcher()
         if bs.is_available():
@@ -145,8 +137,6 @@ class KlineCascade:
                 print(f"  [{name}] 尝试获取 {code} {start_date}~{end_date}...", end=" ")
                 if name == "ifind":
                     candles = self._try_ifind(code, start_date, end_date)
-                elif name == "free":
-                    candles = self._try_free(code, start_date, end_date)
                 else:
                     candles = src.get_kline(code, start_date, end_date)
                 if candles and len(candles) >= 5:
@@ -178,20 +168,6 @@ class KlineCascade:
                 for c in resp.candles
             ]
         return None
-
-    def _try_free(self, code: str, start: str, end: str) -> Optional[List[dict]]:
-        """尝试 freeStockLine"""
-        free = FreeClient()
-        from data_source.base import DataRequest
-        resp = free.get_kline(DataRequest(symbol=code, days=MAX_KLINE_DAYS))
-        if resp and resp.ok and resp.candles:
-            return [
-                {"date": c.date, "open": c.open, "high": c.high,
-                 "low": c.low, "close": c.close, "volume": c.volume}
-                for c in resp.candles
-            ]
-        return None
-
 
 # 全局单例
 _cascade: Optional[KlineCascade] = None

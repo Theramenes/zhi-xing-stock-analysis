@@ -567,6 +567,120 @@ def cmd_holdings_letter(args):
         print("LLM 调用失败。")
 
 
+def cmd_holdings_review(args):
+    """持仓复盘/监控（LLM分析今日操作得失或当前持仓状态）"""
+    from config.llm_config import get_llm_config
+    config = get_llm_config()
+    if not config.available:
+        print("LLM 未配置，请设置 ZX_LLM_API_KEY 环境变量。")
+        return
+
+    from storage.db import get_db
+    from datetime import datetime
+    from storage.kline_filler import ensure_candles
+    from indicators.b1_calculator import compute_single
+    from llm.enhancer import generate_holdings_review
+    from storage.portfolio_db import (
+        list_positions, list_positions_with_archive,
+        get_daily_position_changes, list_transactions
+    )
+
+    date = args.date or datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    mode = args.mode
+    if mode == "auto":
+        mode = "review" if date == today else "monitor"
+
+    active_positions = list_positions()
+
+    closed_positions = []
+    changes = []
+    transactions = []
+    if mode == "review":
+        archived = list_positions_with_archive(date=date, include_active=False)
+        closed_positions = archived
+        changes = get_daily_position_changes(date=date)
+        transactions = [t for t in list_transactions(days=1)
+                        if t.get("trade_date") == date]
+
+    def _enrich(pos_list, is_closed=False):
+        result = []
+        for p in pos_list:
+            code = p.get("code")
+            name = p.get("name", code)
+            try:
+                candles = ensure_candles(code, required_days=30)
+                if len(candles) < 5:
+                    print(f"  {code} {name}: K线不足，跳过")
+                    continue
+                ind = compute_single(code, candles)
+                item = {
+                    "code": code,
+                    "name": name,
+                    "last": ind.get("last", 0),
+                    "change_pct": ind.get("change_pct", 0),
+                }
+                if is_closed:
+                    item["archived_qty"] = p.get("total_qty", 0)
+                    item["avg_cost"] = p.get("avg_cost", 0)
+                    item["closed_price"] = p.get("closed_price", 0)
+                    item["realized_pnl"] = p.get("realized_pnl", 0)
+                    item["realized_pnl_pct"] = p.get("realized_pnl_pct", 0)
+                else:
+                    item["qty"] = p.get("total_qty", 0)
+                    item["cost"] = p.get("avg_cost", 0)
+                    item["J"] = ind.get("J")
+                    item["RSI"] = ind.get("RSI")
+                    item["趋势"] = ind.get("趋势")
+                    item["评分"] = ind.get("评分")
+                    item["B1_active"] = bool(ind.get("信号") or ind.get("基础B1"))
+                    item["near_B1"] = ind.get("J", 999) < 20
+                    item["超缩量"] = ind.get("超缩量", False)
+                result.append(item)
+                print(f"  {code} {name}: 现价={ind.get('last')} 涨跌={ind.get('change_pct', 0):+.2f}%")
+            except Exception as e:
+                print(f"  {code} {name}: 行情获取失败 ({e})")
+        return result
+
+    print(f"[Holdings Review] mode={mode} date={date}")
+    print(f"[Holdings Review] 拉取 {len(active_positions)} 只当前持仓行情...")
+    active_data = _enrich(active_positions, is_closed=False)
+
+    closed_data = []
+    if mode == "review" and closed_positions:
+        print(f"[Holdings Review] 拉取 {len(closed_positions)} 只已清仓行情...")
+        closed_data = _enrich(closed_positions, is_closed=True)
+
+    for c in changes:
+        if not c.get("name"):
+            for p in active_positions + closed_positions:
+                if p.get("code") == c["code"]:
+                    c["name"] = p.get("name", c["code"])
+                    break
+
+    raw_data = {
+        "mode": mode,
+        "date": date,
+        "active": active_data,
+        "closed": closed_data,
+        "changes": changes,
+        "transactions": transactions,
+    }
+
+    print("[Holdings Review] AI 生成中...")
+    md = generate_holdings_review(raw_data)
+    if md:
+        if args.output:
+            with open(args.output, 'w', encoding='utf-8') as f:
+                f.write(md)
+            print(f"已保存到 {args.output}")
+        else:
+            print(md)
+    else:
+        print("LLM 调用失败。")
+
+
 def cmd_watchlist_report(args):
     """关注列表监控报告"""
     from config.llm_config import get_llm_config
@@ -1207,6 +1321,12 @@ def main():
     p_hl = sub.add_parser("holdings-letter", help="生成持仓日报（分析师口吻+次日建议）")
     p_hl.add_argument("--output", "-o", help="报告输出路径")
 
+    p_hr = sub.add_parser("holdings-review", help="持仓复盘/监控（LLM分析今日操作得失或当前持仓状态）")
+    p_hr.add_argument("--date", default=_now_short(), help="日期 (YYYY-MM-DD)，默认今天")
+    p_hr.add_argument("--mode", choices=["auto", "review", "monitor"], default="auto",
+                      help="auto=今天自动复盘，其他日期自动监控; review=强制复盘; monitor=强制监控")
+    p_hr.add_argument("--output", "-o", help="报告输出路径")
+
     p_wr_llm = sub.add_parser("watchlist-report", help="生成关注列表监控报告")
     p_wr_llm.add_argument("--output", "-o", help="报告输出路径")
 
@@ -1328,6 +1448,8 @@ def main():
         cmd_llm_sector(args)
     elif args.command == "holdings-letter":
         cmd_holdings_letter(args)
+    elif args.command == "holdings-review":
+        cmd_holdings_review(args)
     elif args.command == "watchlist-report":
         cmd_watchlist_report(args)
     elif args.command == "trade-diagnosis":
