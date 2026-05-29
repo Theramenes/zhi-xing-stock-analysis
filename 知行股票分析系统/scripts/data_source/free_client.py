@@ -228,16 +228,51 @@ class FreeClient(DataSource):
             return []
 
     def get_sector_members(self, name: str, kind: str = "concept") -> List[StockInfo]:
-        """板块成分股，优先 akshare，降级 efinance"""
-        result = self._try_akshare_members(name)
-        if result:
-            return result
-        return self._try_efinance_members(name)
+        """板块成分股，优先查映射表命中，再调 API。
+        支持概念板块和行业板块两种 kind。"""
+        self._throttle(min_interval=3.0)
+        _set_random_ua()
 
-    def _try_akshare_members(self, name: str) -> Optional[List[StockInfo]]:
+        # 1. 先查映射表，把口语映射到数据源中的标准板块名称
+        from config.theme_chains import resolve_sector
+        concept_name, industry_name = resolve_sector(name)
+        target_name = concept_name if kind == "concept" and concept_name else (industry_name if kind == "industry" and industry_name else name)
+
+        # 2. 尝试获取
+        if kind == "concept" or concept_name:
+            result = self._try_akshare_concept_members(target_name)
+            if result:
+                return result
+        if kind == "industry" or industry_name:
+            result = self._try_akshare_industry_members(target_name)
+            if result:
+                return result
+
+        # 3. 降级 efinance
+        self._throttle(min_interval=3.0)
+        return self._try_efinance_members(target_name)
+
+    def _try_akshare_concept_members(self, name: str) -> Optional[List[StockInfo]]:
+        """akshare 概念板块成分股"""
         try:
             import akshare as ak
-            # 行业板块成分股
+            df = ak.stock_board_concept_cons_em(symbol=name)
+            if df is None or df.empty:
+                return None
+            return [
+                StockInfo(
+                    code=str(r.get("代码", "")).split(".")[0],
+                    name=str(r.get("名称", r.get("股票名称", "")))
+                )
+                for _, r in df.iterrows()
+            ]
+        except Exception:
+            return None
+
+    def _try_akshare_industry_members(self, name: str) -> Optional[List[StockInfo]]:
+        """akshare 行业板块成分股"""
+        try:
+            import akshare as ak
             df = ak.stock_board_industry_cons_em(symbol=name)
             if df is None or df.empty:
                 return None
@@ -257,7 +292,6 @@ class FreeClient(DataSource):
             df = ef.stock.get_belong_board(name)
             if df is None or df.empty:
                 return []
-            # efinance 返回的格式可能不同，做通用处理
             members = []
             for _, r in df.iterrows():
                 code = str(r.get("股票代码", r.get("code", ""))).split(".")[0]
