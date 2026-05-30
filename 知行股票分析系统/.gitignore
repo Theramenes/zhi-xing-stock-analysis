@@ -18,8 +18,8 @@ data/*result*.json
 .vscode/
 .idea/
 
-# 数据库
-*.db
+# 数据库（用户要求多端同步，不再忽略）
+# *.db
 
 # 备份
 *.bak

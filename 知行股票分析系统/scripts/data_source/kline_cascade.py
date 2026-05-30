@@ -30,19 +30,27 @@ def _now():
 
 
 class KlineCascade:
-    """K 线多源级联管理器"""
+    """K 线多源级联管理器 — JusticePlutus 级防爬：熔断器 + 指数退避 + 全局节流"""
+
+    # 熔断参数
+    FUSE_THRESHOLD = 3          # 连续失败几次触发熔断
+    FUSE_COOLDOWN_SEC = 300     # 熔断后冷却多久（5分钟）
+    BACKOFF_BASE = 1.0          # 指数退避基数（秒）
+    BACKOFF_MAX = 3             # 最多重试几次
+    GLOBAL_INTERVAL = 3.0       # 两次外部请求最小间隔（秒）
 
     def __init__(self):
         self._sources = []
-        self._fail_count = {}  # 每个源的连续失败计数
-        self._disabled = set()
+        self._fail_count = {}      # 每个源的连续失败计数
+        self._cooldown_until = {}  # 每个源的熔断截止时间戳
+        self._last_request_time = 0.0  # 上次外部请求时间（全局节流）
 
         # 注册所有源（按优先级）
         ifind = IFindClient()
         if ifind.is_available():
             self._sources.append(("ifind", ifind, 0))
         else:
-            print("  [info]iFind CLI 路径不存在，跳过（token 过期或未安装）")
+            print("  [info]iFind HTTP 不可用，跳过")
 
         efin = EfinanceFetcher()
         if efin.is_available():
@@ -72,9 +80,11 @@ class KlineCascade:
 
     def source_status(self) -> Dict[str, str]:
         status = {}
+        now = time.time()
         for name, src, pri in self._sources:
-            if name in self._disabled:
-                status[name] = "disabled (连续失败)"
+            if self._is_fused(name, now):
+                remain = int(self._cooldown_until[name] - now)
+                status[name] = f"fused ({remain}s left)"
             elif hasattr(src, 'is_available'):
                 status[name] = "ok" if src.is_available() else "unavailable"
             else:
@@ -82,16 +92,50 @@ class KlineCascade:
         status["sqlite"] = "ok" if self._sqlite_available else "unavailable"
         return status
 
+    # ============================================================
+    # 防爬：熔断器 + 指数退避 + 全局节流
+    # ============================================================
+
+    def _is_fused(self, name: str, now: float = None) -> bool:
+        """检查源是否在熔断冷却期内"""
+        if now is None:
+            now = time.time()
+        until = self._cooldown_until.get(name)
+        return until is not None and now < until
+
     def _disable_source(self, name: str):
-        """熔断：连续失败3次后禁用"""
+        """熔断：连续失败 N 次后冷却 M 分钟"""
         self._fail_count[name] = self._fail_count.get(name, 0) + 1
-        if self._fail_count[name] >= 3:
-            self._disabled.add(name)
-            print(f"  [FUSE][{name}] 连续3次失败，已熔断")
+        if self._fail_count[name] >= self.FUSE_THRESHOLD:
+            self._cooldown_until[name] = time.time() + self.FUSE_COOLDOWN_SEC
+            print(f"  [FUSE][{name}] 连续{self.FUSE_THRESHOLD}次失败，熔断 {self.FUSE_COOLDOWN_SEC}s")
 
     def _record_success(self, name: str):
-        if name in self._fail_count:
-            self._fail_count[name] = 0
+        """请求成功：重置失败计数并清除熔断"""
+        self._fail_count[name] = 0
+        self._cooldown_until.pop(name, None)
+
+    def _global_throttle(self):
+        """全局节流：确保两次外部请求之间至少间隔 GLOBAL_INTERVAL 秒"""
+        elapsed = time.time() - self._last_request_time
+        if elapsed < self.GLOBAL_INTERVAL:
+            wait = self.GLOBAL_INTERVAL - elapsed
+            time.sleep(wait)
+        self._last_request_time = time.time()
+
+    def _backoff_retry(self, name: str, fn, *args, **kwargs):
+        """指数退避重试：失败间隔 1s → 2s → 4s，最多重试 BACKOFF_MAX 次"""
+        for attempt in range(self.BACKOFF_MAX + 1):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as e:
+                if attempt < self.BACKOFF_MAX:
+                    wait = self.BACKOFF_BASE * (2 ** attempt)
+                    print(f"  [RETRY][{name}] #{attempt+1} 失败，{wait:.1f}s 后重试...")
+                    time.sleep(wait)
+                else:
+                    raise
+        return None
 
     def get_kline(self, code: str, days: int = None) -> Tuple[Optional[List[dict]], str]:
         """
@@ -118,41 +162,71 @@ class KlineCascade:
         return (datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=int(n * 1.5))).strftime("%Y-%m-%d")
 
     def get_kline_range(self, code: str, start_date: str, end_date: str) -> Tuple[Optional[List[dict]], str]:
-        """按日期范围获取 K 线"""
-        # 1. 先查 SQLite
+        """按日期范围获取 K 线。
+        日期范围由级联管理器统一通过交易日历计算，所有数据源共享同一对 start_date/end_date。
+        iFind（付费HTTP）走独立快速路径，不受熔断/节流/退避影响。
+        免费源（efinance/akshare/baostock）共享熔断器 + 全局节流 + 指数退避。
+        """
         from storage.db import get_db
         db = get_db()
+
+        # 1. 先查 SQLite
         candles = db.get_candles(code, 500)
         if candles:
             existing_dates = {c["date"] for c in candles}
-            # 只要覆盖足够就不走外部源
             if len(existing_dates) >= 30:
                 return candles, "sqlite"
 
-        # 2. 按优先级走外部源
+        # 2. iFind 快速路径（付费API，不需要防爬）
         for name, src, pri in self._sources:
-            if name in self._disabled:
+            if name == "ifind":
+                try:
+                    print(f"  [{name}] 尝试获取 {code} {start_date}~{end_date}...", end=" ")
+                    candles = self._try_ifind(code, start_date, end_date)
+                    if candles and len(candles) >= 5:
+                        print(f"[OK]{len(candles)}条")
+                        db.upsert_candles(code, candles)
+                        return candles, name
+                    else:
+                        print("[FAIL]空/不足")
+                except Exception as e:
+                    print(f"[FAIL]{type(e).__name__}: {str(e)[:60]}")
+                break  # iFind 只试一次，失败就进免费源链路
+
+        # 3. 免费源链路（带熔断 + 全局节流 + 指数退避）
+        now = time.time()
+        for name, src, pri in self._sources:
+            if name == "ifind":
+                continue  # iFind 已在上面处理过
+
+            # 3a. 检查熔断
+            if self._is_fused(name, now):
+                remain = int(self._cooldown_until[name] - now)
+                print(f"  [{name}] 熔断中，{remain}s 后恢复，跳过")
                 continue
+
+            # 3b. 全局节流
+            self._global_throttle()
+
             try:
                 print(f"  [{name}] 尝试获取 {code} {start_date}~{end_date}...", end=" ")
-                if name == "ifind":
-                    candles = self._try_ifind(code, start_date, end_date)
-                else:
-                    candles = src.get_kline(code, start_date, end_date)
+
+                # 3c. 指数退避重试
+                candles = self._backoff_retry(name, src.get_kline, code, start_date, end_date)
+
                 if candles and len(candles) >= 5:
                     print(f"[OK]{len(candles)}条")
                     self._record_success(name)
-                    # 写入 SQLite
                     db.upsert_candles(code, candles)
                     return candles, name
                 else:
-                    print(f"[FAIL]空/不足")
+                    print("[FAIL]空/不足")
                     self._disable_source(name)
             except Exception as e:
                 print(f"[FAIL]{type(e).__name__}: {str(e)[:60]}")
                 self._disable_source(name)
 
-        # 3. 所有外部源失败，返回 SQLite 缓存
+        # 4. 所有外部源失败，返回 SQLite 缓存
         if candles:
             return candles, "sqlite"
         return None, "none"
