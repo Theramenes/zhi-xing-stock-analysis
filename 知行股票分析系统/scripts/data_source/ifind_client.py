@@ -72,22 +72,12 @@ class IFindClient(DataSource):
     # ============================================================
 
     def get_kline(self, req: DataRequest) -> DataResponse:
-        """获取K线（兼容旧接口，用交易日历精确算起始日期）"""
+        """获取K线（兼容旧接口，委托 Coordinator 算日期）"""
+        from data_source.kline_coordinator import get_coordinator
+        c = get_coordinator()
         end = datetime.now().strftime("%Y-%m-%d")
-        start = self._trading_days_ago(end, min(req.days, 120))
-        return self._get_kline_best(req.symbol, start, end)
-
-    @staticmethod
-    def _trading_days_ago(end_date: str, n: int) -> str:
-        """从 end_date 往前数 n 个交易日"""
-        from storage.db import get_db
-        db = get_db()
-        db.ensure_trading_calendar(end=end_date)
-        days = db.get_trading_days("2020-01-01", end_date)
-        if len(days) >= n:
-            return days[-n]
-        from datetime import timedelta
-        return (datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=int(n * 1.5))).strftime("%Y-%m-%d")
+        start = c.compute_start_date(end, min(req.days, 120))
+        return self._get_kline_best(req.symbol, start or "2025-01-01", end)
 
     def get_kline_range(self, symbol: str, start_date: str, end_date: str) -> DataResponse:
         """精确日期范围获取K线"""

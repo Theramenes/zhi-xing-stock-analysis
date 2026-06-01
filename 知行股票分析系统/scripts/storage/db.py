@@ -393,7 +393,7 @@ class StockDB:
 
     def ensure_trading_calendar(self, start: str = "2025-01-01", end: str = None) -> int:
         """
-        从 date_sequence 获取交易日历并缓存。
+        获取交易日历并缓存。三级降级：iFind → baostock → 日历估算。
         已有数据不重复拉取。返回新增天数。（线程安全）
         """
         from datetime import datetime
@@ -401,38 +401,33 @@ class StockDB:
             end = datetime.now().strftime("%Y-%m-%d")
 
         with self._calendar_lock:
-            # 双重检查：锁内再查一次
             last = self.conn.execute("SELECT MAX(date) FROM trading_calendar").fetchone()
             if last and last[0] and str(last[0]) >= end:
                 return 0
 
-            print(f"  [calendar] 更新交易日历 {start} ~ {end}...")
-            from data_source.ifind_client import IFindClient
-            client = IFindClient()
-            data = client._http(
-                "/date_sequence",
-                {"codes": "000001.SH", "startdate": start, "enddate": end,
-                 "functionpara": {"Days": "Tradedays", "Fill": "Omit"},
-                 "indipara": [{"indicator": "ths_close_price_stock", "indiparams": ["", "", ""]}]},
-                timeout=15
-            )
-            if not data or data.get("errorcode") != 0:
+            print(f"  [calendar] 更新交易日历 {last[0] if last else '空'} -> {end} ...")
+            from data_source.trading_calendar import fetch_trading_days
+            days = fetch_trading_days(start, end)
+            if not days:
+                print("  [calendar] 三级降级全部失败")
                 return 0
 
-            tables = data.get("tables", [])
-            if not tables:
-                return 0
-
-            days = tables[0].get("time", [])
-            before = self.conn.total_changes
+            # INSERT OR IGNORE 不触发 total_changes 计数，手动计算
+            existing = set(r[0] for r in self.conn.execute(
+                "SELECT date FROM trading_calendar"
+            ).fetchall())
+            added = 0
             with self.conn:
                 for d in days:
-                    self.conn.execute(
-                        "INSERT OR IGNORE INTO trading_calendar (date) VALUES (?)", (d[:10],)
-                    )
-            added = self.conn.total_changes - before
+                    d10 = d[:10]
+                    if d10 not in existing:
+                        self.conn.execute(
+                            "INSERT INTO trading_calendar (date) VALUES (?)", (d10,)
+                        )
+                        existing.add(d10)
+                        added += 1
             if added:
-                print(f"  [calendar] 新增 {added} 个交易日 (共 {len(days)} 天)")
+                print(f"  [calendar] 新增 {added} 个交易日")
             return added
 
     def get_trading_days(self, start: str, end: str) -> List[str]:

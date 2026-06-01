@@ -71,11 +71,11 @@ class FreeClient(DataSource):
     def __init__(self):
         self._last_call = 0.0
 
-    def _throttle(self, min_interval: float = 2.0):
+    def _throttle(self, min_interval: float = 5.0):
         """强制两次请求之间至少间隔 min_interval 秒"""
         elapsed = time.time() - self._last_call
         if elapsed < min_interval:
-            time.sleep(min_interval - elapsed + random.uniform(0.5, 1.5))
+            time.sleep(min_interval - elapsed + random.uniform(1.0, 3.0))
         self._last_call = time.time()
 
     def is_available(self) -> bool:
