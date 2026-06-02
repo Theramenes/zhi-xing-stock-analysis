@@ -208,10 +208,87 @@ def build_rotating_get(
     return rotating_get
 
 
+def _build_gateway_proxies(gateway_url: str, usernames_str: str) -> List[Dict[str, str]]:
+    """固定代理网关模式：gateway_url + 多个用户名 → 代理字典列表。
+
+    gateway_url: "http://us.lajiaohttp.net:2000"
+    usernames_str: "user-region-US:pass,user-region-JP:pass"
+    每个用户名 = 一个独立出口，多个之间做轮转。
+    """
+    proxies = []
+    for entry in usernames_str.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        parts = entry.rsplit(":", 1)  # 最后冒号分隔用户名和密码
+        if len(parts) == 2:
+            user, password = parts
+        else:
+            user, password = entry, ""
+        proxy_url = gateway_url.replace("http://", f"http://{user}:{password}@", 1)
+        proxy_url = proxy_url.replace("https://", f"https://{user}:{password}@", 1)
+        if "://" not in proxy_url:
+            proxy_url = f"http://{user}:{password}@{gateway_url}"
+        proxies.append({"http": proxy_url, "https": proxy_url.replace("http://", "https://", 1)})
+    return proxies
+
+
 def create_rotating_get() -> Optional[Callable]:
     """对外接口：从环境变量读配置，创建代理轮转函数。
-    不配 ZX_PROXY_API_URL 则返回 None（不启用代理轮转）。
+
+    支持三种模式（优先级从高到低）:
+      1. ZX_PROXY_LIST  — 直接粘贴代理列表（host:port:user:pass，逗号/换行分隔）
+      2. ZX_PROXY_GATEWAY + ZX_PROXY_USERNAMES  — 固定代理网关
+      3. ZX_PROXY_API_URL  — 动态代理 API
+
+    不配任何代理则返回 None（不启用代理轮转）。
     """
+    # 模式1: ZX_PROXY_LIST — 直接贴代理列表
+    proxy_list = os.environ.get("ZX_PROXY_LIST", "").strip()
+    if proxy_list:
+        entries = [e.strip() for e in proxy_list.replace("\n", ",").replace(";", ",").split(",") if e.strip()]
+        gateways = []
+        for entry in entries:
+            p = _parse_proxy(entry, "ip_port_user_pass")
+            if p:
+                gateways.append(p)
+        if gateways:
+            print(f"  [proxy] 列表模式: {len(gateways)} 个出口")
+            def list_supplier():
+                return list(gateways)
+            return build_rotating_get(
+                proxies_supplier=list_supplier,
+                timeout=20, per_proxy_retries=1,
+                backoff=(0.4, 1.0), include_direct=True,
+                max_supplier_refresh=1,
+            )
+
+    # 模式2: 固定代理网关
+    gateway = os.environ.get("ZX_PROXY_GATEWAY", "").strip()
+    if gateway:
+        usernames = os.environ.get("ZX_PROXY_USERNAMES", "").strip()
+        if not usernames:
+            usernames = os.environ.get("ZX_PROXY_USERNAME", "").strip()  # 兼容单用户
+        if not usernames:
+            print("  [proxy] ZX_PROXY_GATEWAY 已设置但未设置 ZX_PROXY_USERNAMES，跳过")
+            return None
+        # 预建代理池（gateway 模式下代理是固定的，不需要动态获取）
+        gateways = _build_gateway_proxies(gateway, usernames)
+        if not gateways:
+            return None
+        print(f"  [proxy] 网关模式: {gateway} ({len(gateways)} 个出口)")
+
+        def gw_supplier():
+            return list(gateways)  # 每次返回副本
+
+        return build_rotating_get(
+            proxies_supplier=gw_supplier,
+            timeout=20, per_proxy_retries=1,
+            backoff=(0.4, 1.0), include_direct=True,
+            max_supplier_refresh=1,  # 网关模式不需要刷新
+        )
+
+    # 模式3: 动态代理 API
     api_url = os.environ.get("ZX_PROXY_API_URL", "").strip()
     if not api_url:
         return None
@@ -223,8 +300,25 @@ def create_rotating_get() -> Optional[Callable]:
     except ValueError:
         count = 2
 
+    # 固定认证（辣脚等：API 只返回 IP，用户名密码固定）
+    fixed_auth = os.environ.get("ZX_PROXY_AUTH", "").strip()
+
     def supplier():
-        return fetch_proxies(api_url, fmt, count=count)
+        raw = fetch_proxies(api_url, fmt, count=count)
+        if not raw or not fixed_auth:
+            return raw
+        # 将 ip:port → ip:port:user:pass 拼上固定认证
+        out = []
+        user, _, pwd = fixed_auth.partition(":")
+        for p in raw:
+            url = p.get("http", "")
+            # 提取 ip:port 部分
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            if parsed.hostname:
+                new_url = f"http://{user}:{pwd}@{parsed.hostname}:{parsed.port}/"
+                out.append({"http": new_url, "https": new_url})
+        return out
 
     return build_rotating_get(
         proxies_supplier=supplier,

@@ -10,7 +10,7 @@ from typing import Optional, List, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-MAX_KLINE_DAYS = 120
+MAX_KLINE_DAYS = 125
 
 
 def _now():

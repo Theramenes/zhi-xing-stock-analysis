@@ -610,7 +610,7 @@ def cmd_holdings_review(args):
             code = p.get("code")
             name = p.get("name", code)
             try:
-                candles = ensure_candles(code, required_days=30)
+                candles = ensure_candles(code, required_days=114)
                 if len(candles) < 5:
                     print(f"  {code} {name}: K线不足，跳过")
                     continue
@@ -1184,6 +1184,190 @@ def _get_biz(code, ov, max_len=60):
     return ""
 
 
+def _get_all_stock_codes(force_refresh: bool = False) -> tuple:
+    """获取全市场A股代码+名称列表，本地缓存优先。返回 (codes, names_dict)。
+    force_refresh 时重新从远程拉取并更新缓存。"""
+    from storage.db import get_db
+    db = get_db()
+
+    # 1. 本地缓存
+    if not force_refresh:
+        rows = db.conn.execute("SELECT code, name FROM stock_info").fetchall()
+        if rows:
+            codes = [r[0] for r in rows]
+            names = {r[0]: r[1] for r in rows}
+            return codes, names
+
+    # 2. baostock 行业分类（含名称）
+    codes, names = _try_baostock_stock_list()
+    if not codes:
+        # 3. akshare 全量
+        codes, names = _try_akshare_stock_list()
+
+    # 4. 写入缓存
+    if codes:
+        now = __import__('datetime').datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        db.conn.execute("DELETE FROM stock_info")
+        for c in codes:
+            db.conn.execute(
+                "INSERT OR REPLACE INTO stock_info(code,name,updated_at) VALUES(?,?,?)",
+                (c, names.get(c, ""), now))
+        db.conn.commit()
+    return codes, names
+
+
+def _try_baostock_stock_list() -> tuple:
+    try:
+        import baostock as bs
+        bs.login()
+        rs = bs.query_stock_industry()
+        codes, names = [], {}
+        while (rs.error_code == '0') and rs.next():
+            r = rs.get_row_data()
+            code = r[1].replace("sh.", "").replace("sz.", "").replace("bj.", "")
+            if code.isdigit() and len(code) == 6:
+                codes.append(code)
+                names[code] = r[2]
+        bs.logout()
+        if codes:
+            codes = list(dict.fromkeys(codes))
+            print(f"  [stock_list] baostock: {len(codes)} 只")
+        return codes, names
+    except Exception:
+        return [], {}
+
+
+def _try_akshare_stock_list() -> tuple:
+    try:
+        import akshare as ak
+        df = ak.stock_info_a_code_name()
+        codes = [str(c) for c in df["code"].tolist()]
+        names = dict(zip(codes, df["name"].tolist()))
+        print(f"  [stock_list] akshare: {len(codes)} 只")
+        return codes, names
+    except Exception:
+        return [], {}
+
+
+def cmd_kline_update(args):
+    """更新K线数据到数据库"""
+    from storage.kline_filler import ensure_candles
+
+    codes = []
+    if args.code:
+        codes = [args.code]
+    elif args.market:
+        from config.blacklist import blacklist as bl
+        print(f"[Kline Update] 获取全市场股票列表...")
+        print(f"  {bl.summary()}")
+        all_codes, name_map = _get_all_stock_codes()
+        codes = [c for c in all_codes if not bl.is_banned(c, name_map.get(c, ""))]
+        print(f"[Kline Update] 全市场（过滤后）: {len(codes)} 只")
+    elif args.sector:
+        from data_source.sector_store import get_sector_members, update_sector
+        print(f"[Kline Update] 先更新板块 '{args.sector}' 的成分股...")
+        update_sector(args.sector)
+        members = get_sector_members(args.sector)
+        codes = [m["code"] for m in members]
+        if not codes:
+            print("板块无成分股缓存，请先运行 sector-update")
+            return
+        print(f"[Kline Update] 板块 '{args.sector}': {len(codes)} 只成分股")
+    elif args.all:
+        from storage.db import get_db
+        db = get_db()
+        codes = [r[0] for r in db.conn.execute("SELECT DISTINCT code FROM stock_daily").fetchall()]
+        print(f"[Kline Update] 全部: {len(codes)} 只")
+    else:
+        print("请指定 --code / --sector / --all / --market")
+        return
+
+    scan_id = None
+    if args.add_watchlist:
+        from storage.portfolio_db import record_b1_scan
+        scan_id = record_b1_scan("market", "全市场扫描", len(codes), 0, 0, "", 0)
+
+    b1_results = []
+    b1_count = near_count = err_count = 0
+    for i, code in enumerate(codes):
+        if i % 100 == 0:
+            print(f"  [{i+1}/{len(codes)}] B1:{b1_count} 近B1:{near_count} err:{err_count}")
+        candles = ensure_candles(code, required_days=args.days)
+        if not candles or len(candles) < args.days:
+            err_count += 1
+            continue
+        from indicators.b1_calculator import compute_single
+        ind = compute_single(code, candles)
+        if not ind or ind.get("error"):
+            err_count += 1
+            continue
+        sj = ind.get("信号", [])
+        is_b1 = bool(sj or ind.get("基础B1"))
+        is_near = (not is_b1) and (ind.get("J") or 999) < 20
+
+        entry = {"code": code, "J": ind.get("J"), "评分": ind.get("评分"),
+                 "趋势": ind.get("趋势"), "B1": is_b1, "信号": sj}
+        b1_results.append(entry)
+
+        if is_b1:
+            b1_count += 1
+            if args.add_watchlist and scan_id:
+                from storage.portfolio_db import add_to_watchlist, add_b1_candidate, record_watchlist_daily
+                name = ind.get("name", code)
+                add_to_watchlist(code, "", source="market_scan", reason="全市场B1", tags=["B1"])
+                add_b1_candidate(scan_id, code, "", "全市场", "B1", ind)
+                record_watchlist_daily(code, ind)
+        elif is_near:
+            near_count += 1
+            if args.add_watchlist and scan_id:
+                from storage.portfolio_db import add_to_watchlist, add_b1_candidate, record_watchlist_daily
+                add_to_watchlist(code, "", source="market_scan", reason="全市场近B1", tags=["近B1"])
+                add_b1_candidate(scan_id, code, "", "全市场", "near_B1", ind)
+                record_watchlist_daily(code, ind)
+
+    if scan_id and (b1_count + near_count > 0):
+        from storage.db import get_db
+        db = get_db()
+        db.conn.execute("UPDATE b1_scan SET b1_count=?, near_b1_count=? WHERE scan_id=?",
+                        (b1_count, near_count, scan_id))
+        db.conn.commit()
+
+    print(f"\n===== 扫描完成 =====")
+    print(f"总数:{len(codes)} B1:{b1_count} 近B1(J<20):{near_count} 错误/数据不足:{err_count}")
+    if b1_count > 0:
+        b1s = [r for r in b1_results if r["B1"]]
+        print(f"\n★ B1 ({b1_count}只, top20):")
+        for r in sorted(b1s, key=lambda x: -(x["评分"] or 0))[:20]:
+            print(f"  {r['code']}: J={r['J']:.1f} 评分={r['评分']} {r['趋势']} [{','.join(r['信号'][:3]) or '-'}]")
+    if near_count > 0 and near_count <= 50:
+        nears = [r for r in b1_results if not r["B1"]]
+        print(f"\n△ 近B1({near_count}只, top15):")
+        for r in sorted(nears, key=lambda x: x["J"] or 999)[:15]:
+            print(f"  {r['code']}: J={r['J']:.1f} 评分={r['评分']}")
+
+
+def cmd_sector_update(args):
+    """更新东财板块成分股缓存"""
+    from data_source.sector_store import update_sector, update_all_from_theme_chains, get_sector_members
+
+    if args.all:
+        print("[Sector Update] 全量更新 theme_chains 板块...")
+        total = update_all_from_theme_chains()
+        print(f"完成: {total} 条")
+        return
+
+    if args.name:
+        print(f"[Sector Update] 更新 '{args.name}' ({args.type}) ...")
+        n = update_sector(args.name, kind=args.type)
+        print(f"完成: {n} 条")
+        members = get_sector_members(args.name, kind=args.type)
+        if members:
+            print(f"前5只: {', '.join(f'{m['code']} {m['name']}' for m in members[:5])}")
+        return
+
+    print("请指定 --name / --all")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="zhi-xing", description="知行股票分析系统 CLI")
     sub = parser.add_subparsers(dest="command", help="子命令")
@@ -1386,6 +1570,20 @@ def main():
     p_sr.add_argument("--workers", type=int, default=20)
     p_sr.add_argument("--days", type=int, default=120)
 
+    # === 数据管理 ===
+    p_ku = sub.add_parser("kline-update", help="更新K线数据到数据库")
+    p_ku.add_argument("--code", "-c", help="股票代码（单只）")
+    p_ku.add_argument("--all", action="store_true", help="更新全部已有股票")
+    p_ku.add_argument("--market", action="store_true", help="全市场扫描（排除920/688）")
+    p_ku.add_argument("--add-watchlist", action="store_true", help="B1候选自动入库关注列表")
+    p_ku.add_argument("--sector", "-s", help="板块名，更新该板块所有成分股")
+    p_ku.add_argument("--days", type=int, default=114, help="需要多少交易日数据")
+
+    p_su = sub.add_parser("sector-update", help="更新东财板块成分股缓存")
+    p_su.add_argument("--name", "-n", help="板块名（不指定则使用theme_chains全量）")
+    p_su.add_argument("--type", default="concept", choices=["concept","industry"])
+    p_su.add_argument("--all", action="store_true", help="全量更新（theme_chains.py 所有板块）")
+
     args = parser.parse_args()
 
     if args.command == "list-sectors":
@@ -1478,6 +1676,12 @@ def main():
         cmd_data_report(args)
     elif args.command == "sector-report":
         cmd_sector_report(args)
+
+    # === 数据管理 ===
+    elif args.command == "kline-update":
+        cmd_kline_update(args)
+    elif args.command == "sector-update":
+        cmd_sector_update(args)
 
     else:
         parser.print_help()

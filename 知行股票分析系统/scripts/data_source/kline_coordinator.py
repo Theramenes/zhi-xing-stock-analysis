@@ -18,11 +18,11 @@ class KlineFetchCoordinator:
     """K 线获取协调者"""
 
     # 熔断/节流参数
-    FUSE_THRESHOLD = 5
-    FUSE_COOLDOWN_SEC = 600
-    BACKOFF_BASE = 2.0
-    BACKOFF_MAX = 3
-    GLOBAL_INTERVAL = 5.0
+    FUSE_THRESHOLD = 8
+    FUSE_COOLDOWN_SEC = 60      # 1分钟冷却，不阻塞批量扫描
+    BACKOFF_BASE = 1.0
+    BACKOFF_MAX = 2
+    GLOBAL_INTERVAL = 2.0       # 掘金终端无封禁风险，2秒足矣
 
     def __init__(self):
         self._sources: List[Tuple[str, object, int]] = []
@@ -94,9 +94,17 @@ class KlineFetchCoordinator:
         else:
             print("  [info] iFind HTTP 不可用，跳过")
 
+        # 掘金 MyQuant（免费源最高优先，数据质量接近看盘软件）
+        from data_source.fetchers.myquant_fetcher import MyQuantFetcher
+        mq = MyQuantFetcher()
+        if mq.is_available():
+            self._sources.append(("myquant", mq, 1))
+        else:
+            print("  [info] 掘金不可用（终端未启动或Token未配置），跳过")
+
         # 腾讯直连
         from data_source.fetchers.tencent_fetcher import TencentFetcher
-        self._sources.append(("tencent", TencentFetcher(), 1))
+        self._sources.append(("tencent", TencentFetcher(), 2))
 
         # 东财直连
         from data_source.fetchers.em_direct_fetcher import EMDirectFetcher
@@ -225,25 +233,53 @@ class KlineFetchCoordinator:
 
     def _iterative_backfill(self, code: str, required_days: int,
                             existing: List[dict], start: str, end: str) -> List[dict]:
-        """数据不足时迭代往前补，最多 3 轮。"""
-        for _round in range(3):
+        """数据不足时迭代往前补。
+
+        停牌/新股：逐轮往前推，拉大缺口范围避免单日空窗。
+        新股（上市不到60天且缺太多）：直接放弃。
+        """
+        db = get_db()
+        all_days = db.get_trading_days("2020-01-01", datetime.now().strftime("%Y-%m-%d"))
+
+        for _round in range(5):
             if len(existing) >= required_days:
                 break
             earliest = min(c["date"] for c in existing)
-            new_end = (datetime.strptime(earliest, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
             gap = required_days - len(existing)
-            new_start = self.compute_start_date(new_end, gap)
-            if not new_start:
+
+            # 交易日历定位，退 gap 个交易日
+            try:
+                idx = all_days.index(earliest)
+            except ValueError:
+                idx = len(all_days) - 1
+
+            if idx < max(gap, 5):
+                # 新股：往前不够 gap 个交易日了
+                print(f"  [backfill] {code} 新股/上市短(最早={earliest})，{len(existing)}天, 放弃")
                 break
+
+            # 精确补缺：最多拉按需+5天，避免东财系被炸断
+            pull_gap = min(gap + 5, len(all_days) - 1)
+            new_start = all_days[max(0, idx - pull_gap)]
+            new_end = all_days[idx - 1]  # earliest 前一个交易日
+
             print(f"  [backfill] {code} 缺{gap}天, {new_start}~{new_end}")
             batch, _ = self._cascade_fetch(code, new_start, new_end)
-            if not batch:
-                break
-            existing_map = {c["date"]: c for c in existing}
-            for c in batch:
-                if c["date"] not in existing_map:
-                    existing_map[c["date"]] = c
-            existing = sorted(existing_map.values(), key=lambda x: x["date"])
+
+            if batch and len(batch) > 0:
+                existing_map = {c["date"]: c for c in existing}
+                for c in batch:
+                    if c["date"] not in existing_map:
+                        existing_map[c["date"]] = c
+                existing = sorted(existing_map.values(), key=lambda x: x["date"])
+            else:
+                # 这个日期段完全没数据（停牌），往前跳一段再试
+                jump = idx - pull_gap
+                if jump <= 0:
+                    break
+                # 更新 existing 的 earliest 到跳过的位置继续
+                continue
+
         return existing
 
     # ================================================================

@@ -40,6 +40,18 @@ CREATE TABLE IF NOT EXISTS trading_calendar (
 -- 持仓账务
 -- ============================================================
 
+-- ============================================================
+-- 全市场股票列表缓存（K线索引key）
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS stock_info (
+    code         TEXT PRIMARY KEY,
+    name         TEXT,
+    market       TEXT,                    -- SH / SZ / BJ
+    listed_date  TEXT,                    -- 上市日期(如有)
+    updated_at   TEXT
+);
+
 CREATE TABLE IF NOT EXISTS position (
     code            TEXT PRIMARY KEY,
     name            TEXT,
@@ -257,6 +269,21 @@ CREATE TABLE IF NOT EXISTS focus_sector_daily (
     hot_rank      INTEGER,
     PRIMARY KEY (date, name)
 );
+
+-- ============================================================
+-- 东财板块成分股缓存
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS sector_stock (
+    sector_name TEXT NOT NULL,
+    sector_type TEXT NOT NULL,         -- industry / concept
+    code        TEXT NOT NULL,
+    name        TEXT,
+    updated_at  TEXT,
+    PRIMARY KEY (sector_name, sector_type, code)
+);
+CREATE INDEX IF NOT EXISTS idx_ss_sector ON sector_stock(sector_name, sector_type);
+CREATE INDEX IF NOT EXISTS idx_ss_code ON sector_stock(code);
 
 -- ============================================================
 -- 审计日志
