@@ -383,33 +383,46 @@ def get_daily_position_changes(date: str = None) -> List[dict]:
 
 def add_to_watchlist(code: str, name: str = "", source: str = "manual", reason: str = "",
                      priority: int = 3, tags: list = None, added_price: float = None,
-                     notes: str = "") -> int:
-    """加入关注列表。返回 1=新增, 2=更新, 0=失败。"""
+                     notes: str = "", level: int = 2) -> int:
+    """加入关注列表。level=1重点, level=2普通。返回 1=新增, 2=更新, 0=失败。"""
     db = _ensure_db()
     try:
-        existing = db.conn.execute("SELECT code, status FROM watchlist WHERE code=?", (code,)).fetchone()
+        existing = db.conn.execute("SELECT code, status, level FROM watchlist WHERE code=?", (code,)).fetchone()
         if existing:
             cur_status = existing[1]
             new_status = "active" if cur_status in ("archived",) else cur_status
+            # 不覆盖已有的 level=1（手动升级的保持重点）
+            keep_level = existing[2] if existing[2] and existing[2] == 1 else level
             db.conn.execute(
                 """UPDATE watchlist SET name=?, source=?, reason=?, priority=?, tags=?,
-                   notes=?, status=? WHERE code=?""",
-                (name, source, reason, priority, _safe_json(tags), notes, new_status, code)
+                   notes=?, status=?, level=? WHERE code=?""",
+                (name, source, reason, priority, _safe_json(tags), notes, new_status, keep_level, code)
             )
             db.conn.commit()
             return 2
         else:
             db.conn.execute(
                 """INSERT INTO watchlist (code, name, source, reason, priority, tags, status,
-                   added_date, added_price, notes)
-                   VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)""",
+                   added_date, added_price, notes, level)
+                   VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)""",
                 (code, name, source, reason, priority, _safe_json(tags),
-                 _now(), added_price, notes)
+                 _now(), added_price, notes, level)
             )
             db.conn.commit()
             return 1
     except Exception:
         return 0
+
+
+def set_watchlist_level(code: str, level: int) -> bool:
+    """设置关注层级 1=重点 2=普通"""
+    db = _ensure_db()
+    try:
+        db.conn.execute("UPDATE watchlist SET level=? WHERE code=?", (level, code))
+        db.conn.commit()
+        return db.conn.total_changes > 0
+    except Exception:
+        return False
 
 
 def list_watchlist(status: str = "active") -> List[dict]:

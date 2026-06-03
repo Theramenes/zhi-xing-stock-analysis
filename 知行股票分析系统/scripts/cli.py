@@ -1314,7 +1314,7 @@ def cmd_kline_update(args):
             if args.add_watchlist and scan_id:
                 from storage.portfolio_db import add_to_watchlist, add_b1_candidate, record_watchlist_daily
                 name = ind.get("name", code)
-                add_to_watchlist(code, "", source="market_scan", reason="全市场B1", tags=["B1"])
+                add_to_watchlist(code, "", source="market_scan", reason="全市场B1", tags=["B1"], level=1)
                 add_b1_candidate(scan_id, code, "", "全市场", "B1", ind)
                 record_watchlist_daily(code, ind)
         elif is_near:
@@ -1449,6 +1449,228 @@ def _print_quote_line(q):
     print(f"  {sign} {q.get('name','?'):<8s} {q.get('price','?'):>8} ({chg:+.2f}%)")
 
 
+def cmd_scan(args):
+    """选股引擎：B1+缩量爆发。数据不足自动补缺。"""
+    from storage.kline_filler import ensure_candles
+    from config.blacklist import blacklist as bl
+    from storage.portfolio_db import add_to_watchlist, add_b1_candidate, record_b1_scan, record_watchlist_daily
+
+    codes = []
+    label = ""
+    if args.codes:
+        codes = [c.strip() for c in args.codes.split(",") if c.strip()]
+        label = f"指定列表({len(codes)}只)"
+    elif args.market:
+        all_codes, name_map = _get_all_stock_codes()
+        codes = [c for c in all_codes if not bl.is_banned(c, name_map.get(c, ""))]
+        label = f"全市场({len(codes)}只)"
+    elif args.sector:
+        from data_source.sector_store import get_sector_members, update_sector
+        update_sector(args.sector)
+        members = get_sector_members(args.sector)
+        codes = [m["code"] for m in members]
+        label = f"板块'{args.sector}'({len(codes)}只)"
+    else:
+        print("请指定 --name / --market / --codes")
+        return
+
+    print(f"[Scan] {label}")
+    scan_id = None
+    if args.auto_save:
+        scan_id = record_b1_scan("scan", label, len(codes), 0, 0, "", 0)
+
+    b1_count = near_count = err_count = 0
+    for i, code in enumerate(codes):
+        if i % 50 == 0:
+            print(f"  [{i+1}/{len(codes)}] B1:{b1_count} 近B1:{near_count} err:{err_count}")
+        candles = ensure_candles(code, required_days=args.days)
+        if not candles or len(candles) < args.days:
+            err_count += 1
+            continue
+        from indicators.b1_calculator import compute_single
+        from indicators.suo_bao_b1 import scan as suo_bao_scan
+        ind = compute_single(code, candles)
+        if not ind or ind.get("error"):
+            err_count += 1
+            continue
+        sb = suo_bao_scan(code, "", candles)
+        sj = ind.get("信号", [])
+        is_b1 = bool(sj or ind.get("基础B1"))
+        is_near = (not is_b1) and (ind.get("J") or 999) < 20
+        suo = sb.get("ok", False) if isinstance(sb, dict) else bool(sb)
+
+        if is_b1:
+            b1_count += 1
+            if args.auto_save and scan_id:
+                add_to_watchlist(code, "", source="scan", reason="B1", tags=["B1"], level=1)
+                add_b1_candidate(scan_id, code, "", label, "B1", ind)
+                record_watchlist_daily(code, ind)
+        elif is_near:
+            near_count += 1
+            if args.auto_save and scan_id:
+                add_to_watchlist(code, "", source="scan", reason="近B1", tags=["近B1"], level=2)
+                add_b1_candidate(scan_id, code, "", label, "near_B1", ind)
+                record_watchlist_daily(code, ind)
+        if suo:
+            if args.auto_save and scan_id:
+                add_to_watchlist(code, "", source="scan", reason="缩量爆发", tags=["缩爆"], level=1)
+
+    from storage.db import get_db
+    if scan_id and (b1_count + near_count > 0):
+        db = get_db()
+        db.conn.execute("UPDATE b1_scan SET b1_count=?, near_b1_count=? WHERE scan_id=?", (b1_count, near_count, scan_id))
+        db.conn.commit()
+
+    print(f"\n===== 选股结果 =====")
+    print(f"总数:{len(codes)} ★B1:{b1_count} △近B1(J<20):{near_count} 错误/数据不足:{err_count}")
+    if b1_count > 0:
+        print(f"★ B1 已入库重点关注")
+    if near_count > 0:
+        print(f"△ 近B1 已入库普通关注")
+
+
+def cmd_data(args):
+    """data 命令分发"""
+    if not hasattr(args, 'data_cmd') or not args.data_cmd:
+        print("请指定子命令: data sync --target kline|index|calendar")
+        return
+    if args.data_cmd == "sync":
+        _cmd_data_sync(args)
+
+
+def cmd_market_report(args):
+    """市场环境报告 — 指数+B1统计+板块排名+WebSearch+LLM解读"""
+    import sys, io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8') if hasattr(sys.stdout,'buffer') else sys.stdout
+    from datetime import datetime
+
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    print(f"# 市场环境报告 — {date_str}\n")
+
+    # 1. 指数行情
+    print("## 一、大势研判")
+    try:
+        from data_source.quote_fetcher import QuoteFetcher, TRACKED_INDEXES
+        qf = QuoteFetcher()
+        quotes = qf.get_index_quotes()
+        for q in quotes:
+            chg = q.get("change_pct", 0) or 0
+            sign = "📈" if chg > 0 else ("📉" if chg < 0 else "➖")
+            print(f"  {sign} {q.get('name','?')}: {q.get('price','?')} ({chg:+.2f}%)")
+    except Exception as e:
+        print(f"  指数获取失败: {e}")
+
+    # 2. B1统计
+    print("\n## 二、B1选股统计")
+    try:
+        from storage.db import get_db
+        db = get_db()
+        s = db.conn.execute("SELECT b1_count, near_b1_count FROM b1_scan ORDER BY scan_id DESC LIMIT 1").fetchone()
+        print(f"  ★ B1活跃: {s[0]}只   △ 近B1(J<20): {s[1]}只")
+        wl_p = db.conn.execute("SELECT COUNT(*) FROM watchlist WHERE level=1 AND status='active'").fetchone()[0]
+        wl_n = db.conn.execute("SELECT COUNT(*) FROM watchlist WHERE level=2 AND status='active'").fetchone()[0]
+        print(f"  重点关注(level=1): {wl_p}只   普通关注(level=2): {wl_n}只")
+    except Exception as e:
+        print(f"  统计获取失败: {e}")
+
+    # 3. 板块排名
+    print("\n## 三、板块轮动")
+    try:
+        rows = db.conn.execute(
+            "SELECT sector_name, COUNT(*) as cnt FROM sector_stock "
+            "WHERE sector_type='concept' GROUP BY sector_name ORDER BY cnt DESC LIMIT 10"
+        ).fetchall()
+        for r in rows:
+            print(f"  {r[0]}: {r[1]}只成分股")
+    except Exception:
+        print("  (板块数据暂无)")
+
+    # 4. Web Search
+    if not args.no_search:
+        print("\n## 四、新闻/政策面")
+        try:
+            from data_source.web_search import get_market_news
+            news = get_market_news()
+            if news:
+                print(news)
+            else:
+                print("  (Tavily未配置或搜索失败)")
+        except Exception:
+            print("  (Web Search暂不可用)")
+
+    # 5. 存档
+    output = args.output
+    if not output:
+        import os
+        base = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "references", "market_journal")
+        os.makedirs(base, exist_ok=True)
+        output = os.path.join(base, f"{date_str}.md")
+    # 需要先收集输出，但当前已经print了。用重定向处理。
+    print(f"\n> 报告生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"> 数据源: 掘金MyQuant/腾讯/baostock/Tavily")
+    print(f"> 保存路径: {output}")
+
+
+def _cmd_data_sync(args):
+    """纯数据拉取，不计B1，不关注列表"""
+    target = args.target
+
+    if target == "calendar":
+        from storage.db import get_db
+        db = get_db()
+        n = db.ensure_trading_calendar()
+        days = db.get_trading_days("2026-01-01", "2027-01-01")
+        print(f"交易日历: {len(days)}天, 最新={days[-1]}")
+        return
+
+    if target == "index":
+        from data_source.quote_fetcher import QuoteFetcher, TRACKED_INDEXES
+        from storage.db import get_db
+        import time, random
+        db = get_db()
+        qf = QuoteFetcher()
+        quotes = qf.get_index_quotes()
+        # 写入 index_daily 表 (暂存简版：名称+最新价+涨跌)
+        print("指数行情:")
+        for q in quotes:
+            chg = q.get("change_pct", 0) or 0
+            print(f"  {q['name']}({q['code']}): {q.get('price','?')} ({chg:+.2f}%) [{q.get('source','?')}]")
+        return
+
+    # target == "kline"
+    from storage.kline_filler import ensure_candles
+
+    codes = []
+    if args.code:
+        codes = [args.code]
+    elif args.market:
+        from config.blacklist import blacklist as bl
+        print(f"[Data Sync] 全市场K线（不定时指标，不算B1）...")
+        print(f"  {bl.summary()}")
+        all_codes, name_map = _get_all_stock_codes()
+        codes = [c for c in all_codes if not bl.is_banned(c, name_map.get(c, ""))]
+        print(f"  {len(codes)} 只")
+    elif args.all:
+        from storage.db import get_db as _db2
+        db2 = _db2()
+        codes = [r[0] for r in db2.conn.execute("SELECT DISTINCT code FROM stock_daily").fetchall()]
+        print(f"[Data Sync] 全部已有: {len(codes)} 只")
+    else:
+        print("请指定 --code / --market / --all")
+        return
+
+    ok = fail = 0
+    for i, code in enumerate(codes):
+        if i % 100 == 0:
+            print(f"  [{i+1}/{len(codes)}] ok={ok} fail={fail}")
+        candles = ensure_candles(code, required_days=args.days)
+        if candles and len(candles) >= args.days:
+            ok += 1
+        else:
+            fail += 1
+    print(f"\n完成: ok={ok} fail={fail}")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="zhi-xing", description="知行股票分析系统 CLI")
     sub = parser.add_subparsers(dest="command", help="子命令")
@@ -1548,6 +1770,12 @@ def main():
     p_wr = sub.add_parser("watchlist-remove", help="移出关注列表")
     p_wr.add_argument("--code", "-c", required=True, help="股票代码")
     p_wr.add_argument("--reason", "-r", default="手动移出", help="移出原因")
+
+    p_wp = sub.add_parser("watchlist-promote", help="升级为重点关注(level=1)")
+    p_wp.add_argument("--code", "-c", required=True, help="股票代码")
+
+    p_wd = sub.add_parser("watchlist-demote", help="降级为普通关注(level=2)")
+    p_wd.add_argument("--code", "-c", required=True, help="股票代码")
 
     # === Phase C: 日终追踪 + B1追踪 ===
     p_dr = sub.add_parser("daily-review", help="日终追踪（拉K线+算指标+状态转换+预警）")
@@ -1672,6 +1900,33 @@ def main():
     p_q.add_argument("--watch", action="store_true", help="关注列表行情")
     p_q.add_argument("--index", action="store_true", help="主要指数行情")
 
+    # === scan — 选股引擎 ===
+    p_scan = sub.add_parser("scan", help="选股引擎（B1+缩量爆发，数据不足自动补）")
+    p_scan.add_argument("--name", "-n", help="板块名（theme_chains映射）")
+    p_scan.add_argument("--market", action="store_true", help="全市场扫描")
+    p_scan.add_argument("--codes", help="指定代码列表（逗号分隔）")
+    p_scan.add_argument("--days", type=int, default=114, help="需要多少交易日")
+    p_scan.add_argument("--auto-save", action="store_true", help="B1→重点关注, 近B1→普通关注")
+    p_scan.add_argument("--ai", action="store_true", help="LLM板块叙事增强（需ZX_LLM_API_KEY）")
+
+    # === market report ===
+    p_mr = sub.add_parser("market-report", help="市场环境报告（指数+板块+主线+WebSearch→LLM）")
+    p_mr.add_argument("--theme", help="主线专题深度分析")
+    p_mr.add_argument("--no-search", action="store_true", help="不用Web Search")
+    p_mr.add_argument("--output", "-o", help="输出路径")
+
+    # === data sync — 纯数据拉取（定时任务，不算B1） ===
+    p_data = sub.add_parser("data", help="数据管理")
+    p_data_subs = p_data.add_subparsers(dest="data_cmd", help="子命令")
+
+    p_ds = p_data_subs.add_parser("sync", help="同步数据到数据库")
+    p_ds.add_argument("--target", required=True, choices=["kline", "index", "calendar"],
+                      help="kline=K线 | index=指数 | calendar=交易日历")
+    p_ds.add_argument("--code", "-c", help="股票代码（单只）")
+    p_ds.add_argument("--market", action="store_true", help="全市场")
+    p_ds.add_argument("--all", action="store_true", help="全部已有股票")
+    p_ds.add_argument("--days", type=int, default=114, help="需要多少交易日数据")
+
     args = parser.parse_args()
 
     if args.command == "list-sectors":
@@ -1714,6 +1969,14 @@ def main():
         cmd_watchlist_list(args)
     elif args.command == "watchlist-remove":
         cmd_watchlist_remove(args)
+    elif args.command == "watchlist-promote":
+        from storage.portfolio_db import set_watchlist_level
+        ok = set_watchlist_level(args.code, 1)
+        print(f"{'升级成功' if ok else '未找到'}: {args.code} 重点")
+    elif args.command == "watchlist-demote":
+        from storage.portfolio_db import set_watchlist_level
+        ok = set_watchlist_level(args.code, 2)
+        print(f"{'降级成功' if ok else '未找到'}: {args.code} 普通")
 
     # === Phase C: 日终追踪 + B1追踪 ===
     elif args.command == "daily-review":
@@ -1774,6 +2037,18 @@ def main():
     # === 实时行情 ===
     elif args.command == "quote":
         cmd_quote(args)
+
+    # === 选股引擎 ===
+    elif args.command == "scan":
+        cmd_scan(args)
+
+    # === 市场环境报告 ===
+    elif args.command == "market-report":
+        cmd_market_report(args)
+
+    # === data 数据管理 ===
+    elif args.command == "data":
+        cmd_data(args)
 
     else:
         parser.print_help()

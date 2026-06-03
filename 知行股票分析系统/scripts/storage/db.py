@@ -52,6 +52,28 @@ CREATE TABLE IF NOT EXISTS stock_info (
     updated_at   TEXT
 );
 
+-- ============================================================
+-- 指数日线数据
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS index_daily (
+    code  TEXT NOT NULL,
+    date  TEXT NOT NULL,
+    open  REAL,
+    high  REAL,
+    low   REAL,
+    close REAL,
+    volume REAL,
+    amount REAL,
+    change_pct REAL,
+    source TEXT DEFAULT '',
+    PRIMARY KEY (code, date)
+);
+
+-- ============================================================
+-- 持仓
+-- ============================================================
+
 CREATE TABLE IF NOT EXISTS position (
     code            TEXT PRIMARY KEY,
     name            TEXT,
