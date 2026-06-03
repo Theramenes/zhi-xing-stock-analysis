@@ -71,6 +71,19 @@ CREATE TABLE IF NOT EXISTS index_daily (
 );
 
 -- ============================================================
+-- 行业索引（code→行业名，B1查询按板块分组用）
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS sector_index (
+    code        TEXT NOT NULL,
+    sector_name TEXT NOT NULL,
+    sector_type TEXT NOT NULL DEFAULT 'industry',   -- industry / concept
+    PRIMARY KEY (code, sector_name, sector_type)
+);
+CREATE INDEX IF NOT EXISTS idx_si_sector ON sector_index(sector_name, sector_type);
+CREATE INDEX IF NOT EXISTS idx_si_code ON sector_index(code);
+
+-- ============================================================
 -- 持仓
 -- ============================================================
 

@@ -22,17 +22,21 @@ def ensure_candles(code: str, required_days: int = 114) -> List[dict]:
     """
     db = get_db()
 
-    # 快速路径：DB 已满足
     candles = db.get_candles(code, required_days)
-    if len(candles) >= required_days:
+
+    # 缓存有效条件：条数够 + 日期覆盖到最近交易日
+    db.ensure_trading_calendar()
+    latest_td = db.conn.execute("SELECT MAX(date) FROM trading_calendar").fetchone()[0]
+    cached_max = max(c["date"] for c in candles) if candles else ""
+
+    if len(candles) >= required_days and cached_max >= latest_td:
         return candles
 
-    # 委托 Coordinator
+    # 委托 Coordinator — 内部自动补缺到最新
     from data_source.kline_coordinator import get_coordinator
     coordinator = get_coordinator()
     result, source = coordinator.fetch_kline(code, required_trading_days=required_days)
     if result:
         return result
 
-    # 全部失败，返回 DB 现有数据
     return candles

@@ -7,21 +7,27 @@ from typing import List
 
 
 def fetch_trading_days(start: str, end: str) -> List[str]:
-    """获取交易日列表。四级降级：新浪 → iFind → baostock → 日历日估算"""
+    """获取交易日列表。五级降级：掘金 → 新浪 → iFind → baostock → 日历日估算"""
 
-    # 0. akshare 新浪交易日历（全量缓存，最快）
+    # 0. 掘金 get_trading_dates（免费、可靠、精确）
+    days = _try_myquant(start, end)
+    if days:
+        print(f"  [calendar] myquant: {len(days)} 天")
+        return days
+
+    # 1. akshare 新浪交易日历（全量缓存，最快）
     days = _try_sina(start, end)
     if days:
         print(f"  [calendar] sina: {len(days)} 天")
         return days
 
-    # 1. iFind HTTP
+    # 2. iFind HTTP
     days = _try_ifind(start, end)
     if days:
         print(f"  [calendar] iFind: {len(days)} 天")
         return days
 
-    # 2. baostock
+    # 3. baostock
     days = _try_baostock(start, end)
     if days:
         print(f"  [calendar] baostock: {len(days)} 天")
@@ -38,6 +44,36 @@ def fetch_trading_days(start: str, end: str) -> List[str]:
             days.append(delta.strftime("%Y-%m-%d"))
         delta += timedelta(days=1)
     return days
+
+
+def _try_myquant(start: str, end: str) -> List[str] | None:
+    """掘金 get_trading_dates — 免费，直接精确"""
+    try:
+        import os, subprocess, json
+        token = os.environ.get("ZX_MYQUANT_TOKEN", "").strip()
+        if not token:
+            return None
+        py_exe = None
+        for candidate in [r"D:\Development\Python\python.exe", r"C:\Users\Theramenes\AppData\Local\Programs\Python\Python313\python.exe"]:
+            if os.path.exists(candidate):
+                py_exe = candidate
+                break
+        if not py_exe:
+            return None
+        script = (
+            "from gm.api import *\n"
+            f"set_token('{token}')\n"
+            "import json\n"
+            f"d = get_trading_dates(exchange='SHSE', start_date='{start}', end_date='{end}')\n"
+            "print(json.dumps(list(d)))\n"
+        )
+        r = subprocess.run([py_exe, "-u", "-c", script], capture_output=True, text=True, timeout=15)
+        if r.returncode != 0 or not r.stdout.strip():
+            return None
+        days = json.loads(r.stdout.strip())
+        return days if days else None
+    except Exception:
+        return None
 
 
 def _try_sina(start: str, end: str) -> List[str] | None:

@@ -166,11 +166,14 @@ class KlineFetchCoordinator:
 
     def _cascade_fetch(self, code: str, start_date: str, end_date: str) -> Tuple[Optional[List[dict]], str]:
         """按优先级遍历数据源。iFind 快速路径不走熔断。"""
-        # 1. SQLite 缓存
+        # 1. SQLite 缓存 — 必须覆盖到 end_date 才算有效
         db = get_db()
         cached = db.get_candles(code, 500)
-        if cached and len({c["date"] for c in cached}) >= 30:
-            return cached, "sqlite"
+        if cached:
+            cached_dates = {c["date"] for c in cached}
+            cached_max = max(cached_dates) if cached_dates else ""
+            if len(cached_dates) >= 30 and cached_max >= end_date:
+                return cached, "sqlite"
 
         # 2. iFind 快速路径（无熔断/节流）
         for name, src, _ in self._sources:
@@ -233,11 +236,10 @@ class KlineFetchCoordinator:
 
     def _iterative_backfill(self, code: str, required_days: int,
                             existing: List[dict], start: str, end: str) -> List[dict]:
-        """数据不足时迭代往前补。
-
-        停牌/新股：逐轮往前推，拉大缺口范围避免单日空窗。
-        新股（上市不到60天且缺太多）：直接放弃。
-        """
+        """数据不足时迭代往前补。缺<3天跳过（无意义补缺），新股直接放弃。"""
+        gap = required_days - len(existing)
+        if gap < 3:
+            return existing  # 差1-2天不值得补，可能是停牌/上市日差
         db = get_db()
         all_days = db.get_trading_days("2020-01-01", datetime.now().strftime("%Y-%m-%d"))
 

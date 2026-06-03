@@ -1368,6 +1368,40 @@ def cmd_sector_update(args):
     print("请指定 --name / --all")
 
 
+def cmd_trend(args):
+    """知行趋势指标分析"""
+    import sys, io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8') if hasattr(sys.stdout,'buffer') else sys.stdout
+    from storage.kline_filler import ensure_candles
+    from indicators.trend_analyzer import TrendAnalyzer
+
+    print(f"[Trend] 拉取 {args.symbol} K线...")
+    candles = ensure_candles(args.symbol, required_days=args.days)
+    if not candles or len(candles) < 110:
+        print(f"K线不足 ({len(candles) if candles else 0}天)")
+        return
+
+    ta = TrendAnalyzer(args.symbol, candles)
+    r = ta.compute()
+    if "error" in r:
+        print(f"计算失败: {r['error']}")
+        return
+
+    print(f"\n{'='*60}")
+    print(f"  知行趋势 — {args.symbol}")
+    print(f"{'='*60}")
+    print(f"  白线(短期): {r['白']:.3f}    黄线(中长期): {r['黄']:.3f}")
+    print(f"  差值: {r['差值_pct']:.1f}% (白{'上' if r['差值_pct']>0 else '下'}黄)")
+    print(f"  白线今日变化率: {r['白_slope_1d']:+.3f}%    黄线5日趋势: {r['黄_slope_5d']:+.3f}%")
+    print(f"  差值趋势: {r['差值_trend']}  ({r['差值_growth']:+.1f}%)")
+    cross_info = r['cross'] or "无" if r['cross_days'] == 0 else f"{r['cross']} ({r['cross_days']}天前)"
+    print(f"  穿越: {cross_info}")
+    print(f"  拐点: {r['inflection'] or '无'}")
+    print(f"  状态: {r['state']}")
+    print(f"  综合评分: {r['score']}/10")
+    print(f"  信号: {', '.join(r['signals'])}")
+
+
 def cmd_quote(args):
     """实时行情查询"""
     import sys, io
@@ -1900,6 +1934,11 @@ def main():
     p_q.add_argument("--watch", action="store_true", help="关注列表行情")
     p_q.add_argument("--index", action="store_true", help="主要指数行情")
 
+    # === 知行趋势指标 ===
+    p_trend = sub.add_parser("trend", help="知行趋势分析（黄白线独立指标）")
+    p_trend.add_argument("--symbol", "-s", required=True, help="股票代码")
+    p_trend.add_argument("--days", type=int, default=125, help="K线天数")
+
     # === scan — 选股引擎 ===
     p_scan = sub.add_parser("scan", help="选股引擎（B1+缩量爆发，数据不足自动补）")
     p_scan.add_argument("--name", "-n", help="板块名（theme_chains映射）")
@@ -2037,6 +2076,10 @@ def main():
     # === 实时行情 ===
     elif args.command == "quote":
         cmd_quote(args)
+
+    # === 知行趋势 ===
+    elif args.command == "trend":
+        cmd_trend(args)
 
     # === 选股引擎 ===
     elif args.command == "scan":

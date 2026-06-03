@@ -387,16 +387,14 @@ def add_to_watchlist(code: str, name: str = "", source: str = "manual", reason: 
     """加入关注列表。level=1重点, level=2普通。返回 1=新增, 2=更新, 0=失败。"""
     db = _ensure_db()
     try:
-        existing = db.conn.execute("SELECT code, status, level FROM watchlist WHERE code=?", (code,)).fetchone()
+        existing = db.conn.execute("SELECT code, status FROM watchlist WHERE code=?", (code,)).fetchone()
         if existing:
             cur_status = existing[1]
             new_status = "active" if cur_status in ("archived",) else cur_status
-            # 不覆盖已有的 level=1（手动升级的保持重点）
-            keep_level = existing[2] if existing[2] and existing[2] == 1 else level
             db.conn.execute(
                 """UPDATE watchlist SET name=?, source=?, reason=?, priority=?, tags=?,
                    notes=?, status=?, level=? WHERE code=?""",
-                (name, source, reason, priority, _safe_json(tags), notes, new_status, keep_level, code)
+                (name, source, reason, priority, _safe_json(tags), notes, new_status, level, code)
             )
             db.conn.commit()
             return 2
