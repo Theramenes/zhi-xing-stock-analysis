@@ -1447,7 +1447,15 @@ def cmd_daily_update(args):
     for e in nearl:
         add_to_watchlist(e["code"], e["name"], source="daily", reason="近B1", tags=["近B1"], level=2)
 
-    # Step 5: 输出
+    # Step 5: B1入库b1_candidate（market report需要用）
+    from storage.portfolio_db import record_b1_scan, add_b1_candidate
+    scan_id = record_b1_scan("daily", today, len(codes), len(b1l), len(nearl), "", 0)
+    for e in b1l:
+        add_b1_candidate(scan_id, e["code"], e["name"], "日更", "B1", e)
+    for e in nearl:
+        add_b1_candidate(scan_id, e["code"], e["name"], "日更", "near_B1", e)
+
+    # Step 6: 输出
     print(f"\n=== 日更结果 ===")
     print(f"★B1: {len(b1l)}只  △近B1: {len(nearl)}只")
     print(f"趋势金叉→重点: {len(tre_l1)}只  趋势拐头向上→普通: {len(tre_l2)}只")
@@ -1705,18 +1713,20 @@ def cmd_market_report(args):
     wl_l1 = db.conn.execute("SELECT COUNT(*) FROM watchlist WHERE level=1 AND status='active'").fetchone()[0]
     wl_l2 = db.conn.execute("SELECT COUNT(*) FROM watchlist WHERE level=2 AND status='active'").fetchone()[0]
 
-    # 板块排名（证监会分类，从sector_index统计B1密度）
+    # 板块排名：取实际有candidate记录的最新批次
     sector_b1 = {}
-    # 直接用最新scan的B1 codes
-    scan_id = db.conn.execute("SELECT MAX(scan_id) FROM b1_scan WHERE b1_count>0").fetchone()
+    scan_id = db.conn.execute(
+        "SELECT scan_id FROM b1_scan WHERE b1_count>0 "
+        "AND (SELECT COUNT(*) FROM b1_candidate WHERE scan_id=b1_scan.scan_id AND category='B1')>0 "
+        "ORDER BY scan_id DESC LIMIT 1"
+    ).fetchone()
     if scan_id and scan_id[0]:
-        rows = db.conn.execute(
+        for r in db.conn.execute(
             "SELECT si.sector_name, COUNT(*) as cnt FROM b1_candidate bc "
             "LEFT JOIN sector_index si ON bc.code=si.code "
             f"WHERE bc.scan_id={scan_id[0]} AND bc.category='B1' "
             "GROUP BY si.sector_name ORDER BY cnt DESC LIMIT 15"
-        ).fetchall()
-        for r in rows:
+        ).fetchall():
             sector_b1[r[0] or "未分类"] = r[1]
 
     # B1变化（新进/消失）
