@@ -66,35 +66,73 @@ class QuoteFetcher:
         return results
 
     def get_index_quotes(self) -> List[Dict]:
-        """主要指数行情（腾讯直连）"""
+        """主要指数行情。三级降级：掘金→腾讯→akshare"""
         results = []
-        import requests, re
         for code, name in TRACKED_INDEXES.items():
-            ts = _TENCENT_INDEX_MAP.get(code, "")
-            try:
-                resp = requests.get(
-                    f"https://qt.gtimg.cn/q={ts}",
-                    headers={"User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"},
-                    timeout=8,
-                )
-                m = re.search(r'v_[a-z]{2}\d{5,6}="(.*)"', resp.text)
-                if m:
-                    f = m.group(1).split("~")
-                    if len(f) > 35 and f[1]:
-                        q = {
-                            "code": code, "name": f[1],
-                            "price": float(f[3]), "change_pct": float(f[32]),
-                            "open": float(f[5]), "high": float(f[33]), "low": float(f[34]),
-                            "volume": float(f[6]) if f[6] else 0, "amount": float(f[37]) if len(f)>37 and f[37] else 0,
-                            "source": "tencent",
-                        }
-                        results.append(q)
-                        continue
-            except Exception:
-                pass
-            results.append({"code": code, "name": name, "price": 0, "change_pct": 0, "source": "none"})
-            time.sleep(0.3)
+            q = None
+            # 1. 掘金 (subprocess Python 3.10)
+            q = self._try_myquant_index(code, name)
+            # 2. 腾讯
+            if not q:
+                q = self._try_tencent_index(_TENCENT_INDEX_MAP.get(code, ""), code, name)
+            # 3. akshare 降级
+            if not q:
+                q = self._try_akshare_index(code, name)
+            if not q:
+                q = {"code": code, "name": name, "price": 0, "change_pct": 0, "source": "none"}
+            results.append(q)
+            time.sleep(0.2)
         return results
+
+    def _try_myquant_index(self, code: str, name: str) -> Optional[Dict]:
+        try:
+            import os, subprocess, json
+            token = os.environ.get("ZX_MYQUANT_TOKEN", "")
+            if not token:
+                return None
+            py_exe = None
+            for c in [r"D:\Development\Python\python.exe", r"C:\Users\Theramenes\AppData\Local\Programs\Python\Python313\python.exe"]:
+                if os.path.exists(c):
+                    py_exe = c
+                    break
+            if not py_exe:
+                return None
+            prefix = "SHSE" if code.startswith(("0","6","9")) else "SZSE"
+            script = (
+                "from gm.api import *\n"
+                f"set_token('{token}')\n"
+                "import json\n"
+                f"data = current(symbols='{prefix}.{code}')\n"
+                "if not data or len(data)==0: print('null')\n"
+                "else:\n"
+                " r=data[0]; out={'price':float(r.get('price',0)),'change_pct':float(r.get('change_pct',0) or r.get('change_ratio',0) or 0)}\n"
+                " print(json.dumps(out))\n"
+            )
+            r = subprocess.run([py_exe, "-u", "-c", script], capture_output=True, text=True, timeout=15)
+            if r.returncode != 0 or not r.stdout.strip() or r.stdout.strip() == "null":
+                return None
+            data = json.loads(r.stdout.strip())
+            return {"code": code, "name": name, "price": data.get("price", 0),
+                    "change_pct": data.get("change_pct", 0), "source": "myquant"}
+        except Exception:
+            return None
+
+    def _try_akshare_index(self, code: str, name: str) -> Optional[Dict]:
+        try:
+            import akshare as ak
+            df = ak.stock_zh_index_spot_em()
+            if df is None or df.empty:
+                return None
+            row = df[df["代码"] == code]
+            if row.empty:
+                return None
+            r = row.iloc[0]
+            return {"code": code, "name": name,
+                    "price": float(r.get("最新价", 0)),
+                    "change_pct": float(r.get("涨跌幅", 0)),
+                    "source": "akshare"}
+        except Exception:
+            return None
 
     # ============================================================
     # 掘金
