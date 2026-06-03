@@ -1368,6 +1368,87 @@ def cmd_sector_update(args):
     print("请指定 --name / --all")
 
 
+def cmd_quote(args):
+    """实时行情查询"""
+    import sys, io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8') if hasattr(sys.stdout,'buffer') else sys.stdout
+
+    from data_source.quote_fetcher import QuoteFetcher
+    qf = QuoteFetcher()
+
+    if args.symbol:
+        print(f"查询 {args.symbol} ...")
+        q = qf.get_quote(args.symbol)
+        if q:
+            _print_quote(q)
+        else:
+            print("查询失败")
+
+    elif args.holdings:
+        from storage.portfolio_db import list_positions
+        positions = list_positions()
+        if not positions:
+            print("无持仓")
+            return
+        codes = [p["code"] for p in positions]
+        print(f"持仓行情 ({len(codes)}只)...")
+        for c in codes:
+            q = qf.get_quote(c)
+            if q:
+                _print_quote_line(q)
+            else:
+                print(f"  {c}: 查询失败")
+
+    elif args.watch:
+        from storage.portfolio_db import list_watchlist
+        watchers = list_watchlist("active")
+        if not watchers:
+            print("无活跃关注")
+            return
+        codes = [w["code"] for w in watchers]
+        print(f"关注行情 ({len(codes)}只)...")
+        for c in codes:
+            q = qf.get_quote(c)
+            if q:
+                _print_quote_line(q)
+            else:
+                print(f"  {c}: 查询失败")
+
+    elif args.index:
+        print("主要指数行情...")
+        quotes = qf.get_index_quotes()
+        for q in quotes:
+            chg = q.get("change_pct", 0) or 0
+            print(f"  {q['name']}({q['code']}): {q.get('price','?')} ({chg:+.2f}%)")
+
+    else:
+        print("请指定 --symbol / --holdings / --watch / --index")
+
+
+def _print_quote(q):
+    """打印完整行情"""
+    print(f"{'='*60}")
+    print(f"  {q.get('name','?')}({q.get('code','?')})")
+    print(f"  最新价: {q.get('price','?')}  ({q.get('change_pct',0):+.2f}%)")
+    print(f"  今开: {q.get('open','?')}  最高: {q.get('high','?')}  最低: {q.get('low','?')}")
+    if q.get('volume'):
+        print(f"  成交量: {q['volume']:.0f}  成交额: {q.get('amount',0):.2f}")
+    if q.get('pe'):
+        print(f"  PE: {q['pe']:.1f}  PB: {q.get('pb','?'):.1f}")
+    if q.get('volume_ratio'):
+        print(f"  量比: {q['volume_ratio']:.2f}  换手率: {q.get('turnover_rate','?'):.2f}%")
+    if q.get('total_mv'):
+        print(f"  总市值: {q['total_mv']:.0f}")
+    print(f"  数据源: {q.get('source','?')}")
+
+
+def _print_quote_line(q):
+    """单行行情"""
+    chg = q.get("change_pct", 0) or 0
+    sign = "🔴" if chg < 0 else ("🟢" if chg > 0 else "⚪")
+    print(f"  {sign} {q.get('name','?'):<8s} {q.get('price','?'):>8} ({chg:+.2f}%)")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="zhi-xing", description="知行股票分析系统 CLI")
     sub = parser.add_subparsers(dest="command", help="子命令")
@@ -1584,6 +1665,13 @@ def main():
     p_su.add_argument("--type", default="concept", choices=["concept","industry"])
     p_su.add_argument("--all", action="store_true", help="全量更新（theme_chains.py 所有板块）")
 
+    # === 实时行情 ===
+    p_q = sub.add_parser("quote", help="实时行情查询（掘金→腾讯→akshare级联）")
+    p_q.add_argument("--symbol", "-s", help="股票代码（单只）")
+    p_q.add_argument("--holdings", action="store_true", help="当前持仓行情")
+    p_q.add_argument("--watch", action="store_true", help="关注列表行情")
+    p_q.add_argument("--index", action="store_true", help="主要指数行情")
+
     args = parser.parse_args()
 
     if args.command == "list-sectors":
@@ -1682,6 +1770,10 @@ def main():
         cmd_kline_update(args)
     elif args.command == "sector-update":
         cmd_sector_update(args)
+
+    # === 实时行情 ===
+    elif args.command == "quote":
+        cmd_quote(args)
 
     else:
         parser.print_help()
