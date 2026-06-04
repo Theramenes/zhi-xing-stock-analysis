@@ -1678,6 +1678,121 @@ def cmd_data(args):
         _cmd_data_sync(args)
 
 
+def cmd_find(args):
+    """智能选股 — 精确板块/模糊语义 → scan"""
+    import sys, io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8') if hasattr(sys.stdout,'buffer') else sys.stdout
+
+    # Step 1: 解析 query → 行业列表
+    sectors = []
+    if args.name:
+        from config.theme_chains import resolve_sector as rs
+        concept, industry = rs(args.name)
+        if concept:
+            sectors = [{"name": concept, "type": "concept", "reason": "精确指定"}]
+        elif industry:
+            sectors = [{"name": industry, "type": "industry", "reason": "精确指定"}]
+        else:
+            # 不在映射表里，直接当行业名
+            sectors = [{"name": args.name, "type": "concept", "reason": "直接使用"}]
+    elif args.query:
+        print(f"[Find] 解析: {args.query}")
+        try:
+            from llm.router import resolve_query_to_sectors
+            result = resolve_query_to_sectors(args.query)
+            if result and result.get("sectors"):
+                sectors = result["sectors"]
+                print(f"  {result.get('summary', '')}")
+            else:
+                print("  未能解析到行业，请用更具体的描述")
+                return
+        except Exception as e:
+            print(f"  LLM 解析失败: {e}")
+            print("  请用 --name 指定精确板块名")
+            return
+    else:
+        print("请指定 --name 板块名 或 query")
+        return
+
+    # Step 2: 对每个行业取成分股
+    from data_source.sector_store import get_sector_members, update_sector
+    from config.blacklist import blacklist as bl
+    print(f"  找到 {len(sectors)} 个板块:")
+    all_codes = []
+    for s in sectors:
+        n = s["name"]
+        print(f"    {n} ({s['type']}): {s['reason']}")
+        # 尝试从缓存取，失败则实时拉
+        members = get_sector_members(n, kind=s["type"])
+        if not members:
+            print(f"      缓存为空，实时拉取...")
+            n2 = update_sector(n, kind=s["type"])
+            members = get_sector_members(n, kind=s["type"])
+        if members:
+            for m in members:
+                if not bl.is_banned(m["code"], m.get("name", "")):
+                    all_codes.append(m["code"])
+            print(f"      {len(members)}只成分股")
+        else:
+            print(f"      无成分股数据")
+
+    all_codes = list(set(all_codes))
+    if not all_codes:
+        print("  未能获取任何成分股")
+        return
+    print(f"\n  共 {len(all_codes)} 只待扫描")
+
+    # Step 3: 扫描
+    from storage.kline_filler import ensure_candles
+    from indicators.b1_calculator import compute_single
+    from indicators.trend_analyzer import TrendAnalyzer
+    from storage.portfolio_db import add_to_watchlist
+    from storage.db import get_db
+    db = get_db()
+    names = {r[0]: r[1] for r in db.conn.execute("SELECT code,name FROM stock_info").fetchall()}
+
+    b1l, tre_l1, tre_l2, err = [], [], [], 0
+    for i, c in enumerate(all_codes):
+        candles = ensure_candles(c, 125)
+        if not candles or len(candles) < 110:
+            err += 1
+            continue
+        ind = compute_single(c, candles)
+        if not ind or ind.get("error"):
+            err += 1
+            continue
+        # B1
+        sj = ind.get("信号", [])
+        j = ind.get("J", 999)
+        if sj or ind.get("基础B1"):
+            b1l.append({"code": c, "name": names.get(c, ""), "J": round(j, 1) if j else 0,
+                        "信号": sj})
+            add_to_watchlist(c, names.get(c, ""), source="find", reason="B1", level=1)
+        # 趋势
+        t = TrendAnalyzer(c, candles).compute()
+        if "error" in t:
+            continue
+        if t["cross"] == "golden":
+            tre_l1.append({"code": c, "name": names.get(c, ""), "state": t["state"], "score": t["score"]})
+            add_to_watchlist(c, names.get(c, ""), source="find", reason="金叉", level=1)
+        elif t["state"] == "拐头向上":
+            tre_l2.append({"code": c, "name": names.get(c, ""), "score": t["score"]})
+            add_to_watchlist(c, names.get(c, ""), source="find", reason="拐头向上", level=2)
+
+    # Step 4: 输出
+    print(f"\n=== 选股结果 ===")
+    print(f"★B1: {len(b1l)}只  |  趋势金叉: {len(tre_l1)}只  |  拐头向上: {len(tre_l2)}只  |  错误: {err}")
+    if b1l:
+        print(f"\n★ B1信号:")
+        for r in sorted(b1l, key=lambda x: x["J"]):
+            sigs = ",".join(r["信号"][:2]) if r["信号"] else "-"
+            print(f"  {r['code']} {r['name']}: J={r['J']:.1f} [{sigs}]")
+    if tre_l1:
+        print(f"\n★ 金叉(重点): {(', '.join(e['code']+'('+str(e['score'])+')' for e in tre_l1))}")
+    if tre_l2:
+        print(f"\n△ 拐头向上(普通): {(', '.join(e['code']+'('+str(e['score'])+')' for e in tre_l2[:10]))}")
+
+
 def cmd_market_report(args):
     """市场环境报告 — DB数据 + Tavily WebSearch + LLM整合 → MD存档 → 飞书"""
     import sys, io, os
@@ -2197,6 +2312,11 @@ def main():
     p_mr.add_argument("--no-search", action="store_true", help="不用Web Search")
     p_mr.add_argument("--output", "-o", help="输出路径")
 
+    # === find — 智能选股 ===
+    p_find = sub.add_parser("find", help="智能选股（板块→扫描→B1+趋势，支持模糊语义）")
+    p_find.add_argument("query", nargs="?", help="自然语言 query 或精确板块名")
+    p_find.add_argument("--name", "-n", help="精确板块名（不走LLM）")
+
     # === data sync — 纯数据拉取（定时任务，不算B1） ===
     p_data = sub.add_parser("data", help="数据管理")
     p_data_subs = p_data.add_subparsers(dest="data_cmd", help="子命令")
@@ -2335,6 +2455,10 @@ def main():
     # === 市场环境报告 ===
     elif args.command == "market-report":
         cmd_market_report(args)
+
+    # === find 智能选股 ===
+    elif args.command == "find":
+        cmd_find(args)
 
     # === data 数据管理 ===
     elif args.command == "data":

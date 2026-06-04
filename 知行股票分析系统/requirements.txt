@@ -1,0 +1,24 @@
+# 核心（必须）
+requests>=2.28.0
+pandas>=1.5.0
+
+# 多源级联（免费K线/行情兜底）
+akshare>=1.17.0
+efinance>=0.5.5
+baostock>=0.8.0
+
+# 掘金 MyQuant（主力数据源，仅支持 Python <=3.13）
+gm>=3.0.114
+
+# LLM 增强（可选，个股/持仓/市场环境分析）
+openai>=1.0.0
+
+# Web Search（可选，市场环境报告）
+tavily-python>=0.3.0
+
+# 代理轮转（可选，解决东财IP封禁）
+PySocks>=1.7.0
+urllib3>=1.26.0
+
+# 进度条（akshare依赖）
+tqdm

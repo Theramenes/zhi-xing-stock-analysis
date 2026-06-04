@@ -17,9 +17,10 @@ except ImportError:
     _HAS_OPENAI = False
 
 
-def _call_openai(messages: list, json_mode: bool = False, max_tokens: int = 4096) -> dict | None:
+def _call_openai(messages: list, json_mode: bool = False, max_tokens: int = 4096, role: str = "analyst") -> dict | None:
     """OpenAI SDK 调用"""
-    config = get_llm_config()
+    from config.llm_config import get_profile
+    config = get_profile(role)
     client = OpenAI(base_url=config.base_url, api_key=config.api_key)
     kwargs = dict(
         model=config.model,
@@ -48,10 +49,11 @@ def _call_openai(messages: list, json_mode: bool = False, max_tokens: int = 4096
     }
 
 
-def _call_requests(messages: list, json_mode: bool = False, max_tokens: int = 4096) -> dict | None:
+def _call_requests(messages: list, json_mode: bool = False, max_tokens: int = 4096, role: str = "analyst") -> dict | None:
     """requests 直接 HTTP 调用（OpenAI-compatible 协议）"""
     import requests
-    config = get_llm_config()
+    from config.llm_config import get_profile
+    config = get_profile(role)
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {config.api_key}",
@@ -105,12 +107,14 @@ def _extract_json(text: str) -> str:
     return text.strip()
 
 
-def chat(messages: list, json_mode: bool = False, max_retries: int = 3, max_tokens: int = 4096) -> dict | None:
+def chat(messages: list, json_mode: bool = False, max_retries: int = 3, max_tokens: int = 4096, role: str = "analyst") -> dict | None:
     """
     LLM 对话调用，自动选择 SDK 或 requests fallback。
+    role: analyst(DeepSeek+thinking) | router(千问) | reporter(DeepSeek)
     Returns: {"content": str, "model": str, "tokens_in": int, "tokens_out": int} | None
     """
-    config = get_llm_config()
+    from config.llm_config import get_profile
+    config = get_profile(role)
     if not config.available:
         return None
 
@@ -119,7 +123,7 @@ def chat(messages: list, json_mode: bool = False, max_retries: int = 3, max_toke
     last_err = None
     for attempt in range(max_retries):
         try:
-            return caller(messages, json_mode=json_mode, max_tokens=max_tokens)
+            return caller(messages, json_mode=json_mode, max_tokens=max_tokens, role=role)
         except Exception as e:
             last_err = e
             if attempt < max_retries - 1:
