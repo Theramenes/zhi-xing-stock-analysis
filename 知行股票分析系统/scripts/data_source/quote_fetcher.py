@@ -154,7 +154,7 @@ class QuoteFetcher:
                 break
         if not py310:
             return None
-        prefix = "SHSE" if code.startswith(("6","9")) else "SZSE"
+        prefix = "SHSE" if code.startswith(("5", "6", "9")) else "SZSE"
         script = (
             "import sys\n"
             "from gm.api import *\n"
@@ -192,7 +192,7 @@ class QuoteFetcher:
     def _try_tencent(self, code: str) -> Optional[Dict]:
         try:
             import re, requests
-            prefix = "sh" if code.startswith(("6", "9")) else "sz"
+            prefix = "sh" if code.startswith(("5", "6", "9")) else "sz"
             ts = f"{prefix}{code}"
             return self._try_tencent_index(ts, code, "")
         except Exception:
@@ -210,7 +210,7 @@ class QuoteFetcher:
             match = re.search(r'v_[a-z]{2}\d{5,6}="(.*)"', text)
             if not match:
                 return None
-            fields = match.group(2).split("~")
+            fields = match.group(1).split("~")
             if len(fields) < 35 or not fields[1]:
                 return None
             return {

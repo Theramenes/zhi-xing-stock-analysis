@@ -38,7 +38,7 @@ class EMDirectFetcher:
         """
         try:
             # 确定 market: 0=深圳, 1=上海
-            if code.startswith(("6", "9")):
+            if code.startswith(("5", "6", "9")):
                 secid = f"1.{code}"
             else:
                 secid = f"0.{code}"

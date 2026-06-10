@@ -49,6 +49,6 @@ class CachedAdapter(DataSource):
         try:
             from storage.db import get_db
             db = get_db()
-            db.upsert_candles(symbol, candles)
+            db.upsert_candles(symbol, candles, source=self.name)
         except Exception:
             pass

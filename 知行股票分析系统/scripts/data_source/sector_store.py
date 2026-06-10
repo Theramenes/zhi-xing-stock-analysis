@@ -22,9 +22,14 @@ def update_sector(name: str, kind: str = "concept") -> int:
     """从东财 API 拉取板块成分股并缓存。返回写入条数。"""
     db = get_db()
 
-    members = _try_akshare(name, kind)
+    # 东财→efinance→sector_index→theme_chains 四级降级
+    members = _try_akshare(name, kind) or _try_efinance(name, kind)
+
     if not members:
-        members = _try_efinance(name, kind)
+        members = _try_sector_index_db(name)
+
+    if not members:
+        members = _try_theme_chains_stocks(name)
 
     if not members:
         return 0
@@ -113,6 +118,40 @@ def _try_akshare(name: str, kind: str) -> Optional[List[tuple]]:
         if df is None or df.empty:
             return None
         return [(str(r["代码"]).split(".")[0], str(r["名称"])) for _, r in df.iterrows()]
+    except Exception:
+        return None
+
+
+def _try_sector_index_db(name: str) -> Optional[List[tuple]]:
+    """sector_index 降级：按证监会行业名查成分股"""
+    try:
+        db = get_db()
+        rows = db.conn.execute(
+            "SELECT si.code, COALESCE(si2.name,'') FROM sector_index si "
+            "LEFT JOIN stock_info si2 ON si.code=si2.code "
+            "WHERE si.sector_name=? ORDER BY si.code", (name,)
+        ).fetchall()
+        if rows:
+            print(f"  [sector_index] {name}: {len(rows)}只")
+            return [(r[0], r[1]) for r in rows]
+    except Exception:
+        pass
+    return None
+
+
+def _try_theme_chains_stocks(name: str) -> Optional[List[tuple]]:
+    """theme_chains.py 硬编码标的兜底"""
+    try:
+        from config.theme_chains import THEME_CHAINS, resolve_theme
+        theme_name, chain = resolve_theme(name)
+        if not chain:
+            return None
+        codes = []
+        for code_list in chain.values():
+            codes.extend(code_list)
+        codes = list(dict.fromkeys(codes))
+        print(f"  [theme_chains] {name}: {len(codes)}只")
+        return [(c, "") for c in codes]
     except Exception:
         return None
 

@@ -14,6 +14,18 @@ import sys
 import os
 from datetime import datetime
 
+# ═══ 自动加载 SKILL 级环境变量（子进程不继承 Claude Agent env） ═══
+_PROJ_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SETTINGS_PATH = os.path.join(_PROJ_ROOT, '.claude', 'settings.json')
+if os.path.exists(_SETTINGS_PATH):
+    try:
+        with open(_SETTINGS_PATH, 'r', encoding='utf-8') as _f:
+            for _k, _v in (json.load(_f).get('env') or {}).items():
+                if _k not in os.environ:
+                    os.environ[_k] = str(_v)
+    except Exception:
+        pass
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from indicators.b1_calculator import compute_single
@@ -1320,10 +1332,9 @@ def cmd_kline_update(args):
         elif is_near:
             near_count += 1
             if args.add_watchlist and scan_id:
-                from storage.portfolio_db import add_to_watchlist, add_b1_candidate, record_watchlist_daily
-                add_to_watchlist(code, "", source="market_scan", reason="全市场近B1", tags=["近B1"])
+                from storage.portfolio_db import add_b1_candidate, record_watchlist_daily
                 add_b1_candidate(scan_id, code, "", "全市场", "near_B1", ind)
-                record_watchlist_daily(code, ind)
+                record_watchlist_daily(code, ind)  # 近B1只统计不进关注列表
 
     if scan_id and (b1_count + near_count > 0):
         from storage.db import get_db
@@ -1368,110 +1379,6 @@ def cmd_sector_update(args):
     print("请指定 --name / --all")
 
 
-def cmd_daily_update(args):
-    """日更全流程：K线同步 → B1扫描 → 趋势追踪 → 关注列表分层"""
-    import sys, io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8') if hasattr(sys.stdout,'buffer') else sys.stdout
-
-    from storage.db import get_db
-    from storage.kline_filler import ensure_candles
-    from indicators.b1_calculator import compute_single
-    from indicators.trend_analyzer import TrendAnalyzer
-    from indicators.suo_bao_b1 import scan as suo_bao_scan
-    from storage.portfolio_db import add_to_watchlist, record_watchlist_daily
-    from tracking.trend_tracker import daily_trend_update
-
-    db = get_db()
-    db.ensure_trading_calendar()
-    today = db.conn.execute("SELECT MAX(date) FROM trading_calendar").fetchone()[0]
-
-    # Step 1: 关注+持仓列表
-    codes = set()
-    for (c,) in db.conn.execute("SELECT DISTINCT code FROM watchlist WHERE status='active'").fetchall():
-        codes.add(c)
-    for (c,) in db.conn.execute("SELECT DISTINCT code FROM position").fetchall():
-        codes.add(c)
-    codes = sorted(codes)
-    print(f"[日更] {today} | {len(codes)}只")
-
-    # Step 2: 补K线(增量)
-    ok = fail = 0
-    for i, c in enumerate(codes):
-        if i % 50 == 0:
-            print(f"  K线[{i+1}/{len(codes)}] ok={ok} fail={fail}")
-        rows = ensure_candles(c, required_days=args.days)
-        if rows and len(rows) >= 110:
-            ok += 1
-        else:
-            fail += 1
-    print(f"  K线: ok={ok} fail={fail}")
-
-    # Step 3: B1+趋势+缩爆
-    names = {r[0]: r[1] for r in db.conn.execute("SELECT code,name FROM stock_info").fetchall()}
-    b1l, nearl, tre_l2, tre_l1, errl = [], [], [], [], []
-    for c in codes:
-        rows = db.get_candles(c, 250)
-        if not rows or len(rows) < 110:
-            errl.append(c)
-            continue
-        ind = compute_single(c, rows)
-        if not ind or ind.get("error"):
-            errl.append(c)
-            continue
-        # B1
-        sj = ind.get("信号", [])
-        j = ind.get("J", 999)
-        if sj or ind.get("基础B1"):
-            b1l.append({"code": c, "name": names.get(c, ""), "J": round(j, 1) if j else 0,
-                        "RSI": round(ind.get("RSI", 0), 1), "信号": sj})
-        elif j < 20:
-            nearl.append({"code": c, "name": names.get(c, ""), "J": round(j, 1) if j else 0})
-
-        # 趋势
-        t = TrendAnalyzer(c, rows).compute()
-        if "error" in t:
-            continue
-        if t["cross"] == "golden":
-            tre_l1.append({"code": c, "name": names.get(c, ""), "state": t["state"],
-                           "score": t["score"], "slope_ratio": t["斜率比"]})
-        elif t["state"] == "拐头向上":
-            tre_l2.append({"code": c, "name": names.get(c, ""), "state": t["state"],
-                           "score": t["score"], "slope_ratio": t["斜率比"]})
-
-    # Step 4: 趋势状态转移 + 分层入库
-    trend_result = daily_trend_update(codes)
-
-    # B1→level=1, 近B1→level=2
-    for e in b1l:
-        add_to_watchlist(e["code"], e["name"], source="daily", reason="B1", tags=["B1"], level=1)
-    for e in nearl:
-        add_to_watchlist(e["code"], e["name"], source="daily", reason="近B1", tags=["近B1"], level=2)
-
-    # Step 5: B1入库b1_candidate（market report需要用）
-    from storage.portfolio_db import record_b1_scan, add_b1_candidate
-    scan_id = record_b1_scan("daily", today, len(codes), len(b1l), len(nearl), "", 0)
-    for e in b1l:
-        add_b1_candidate(scan_id, e["code"], e["name"], "日更", "B1", e)
-    for e in nearl:
-        add_b1_candidate(scan_id, e["code"], e["name"], "日更", "near_B1", e)
-
-    # Step 6: 输出
-    print(f"\n=== 日更结果 ===")
-    print(f"★B1: {len(b1l)}只  △近B1: {len(nearl)}只")
-    print(f"趋势金叉→重点: {len(tre_l1)}只  趋势拐头向上→普通: {len(tre_l2)}只")
-    print(f"状态转移: {len(trend_result['transitions'])}条")
-    for tr in trend_result["transitions"][:15]:
-        print(f"  {tr['code']} {tr['prev']}→{tr['curr']}: {tr['reason']}")
-    if tre_l1:
-        items = [e['code'] + '(' + str(e['score']) + ')' for e in tre_l1]
-        print(f"\n★ 金叉(重点): {', '.join(items)}")
-    if tre_l2:
-        items2 = [e['code'] + '(' + str(e['score']) + ')' for e in tre_l2[:10]]
-        print(f"△ 拐头向上(普通): {', '.join(items2)}")
-    t = db.conn.execute("SELECT COUNT(*) FROM watchlist WHERE status='active'").fetchone()[0]
-    l1 = db.conn.execute("SELECT COUNT(*) FROM watchlist WHERE status='active' AND level=1").fetchone()[0]
-    l2 = db.conn.execute("SELECT COUNT(*) FROM watchlist WHERE status='active' AND level=2").fetchone()[0]
-    print(f"\n关注列表: {t}只 (重点{l1} 普通{l2})")
 
 
 def cmd_trend(args):
@@ -1590,11 +1497,26 @@ def _print_quote_line(q):
 
 
 def cmd_scan(args):
-    """选股引擎：B1+缩量爆发。数据不足自动补缺。"""
-    from storage.kline_filler import ensure_candles
-    from config.blacklist import blacklist as bl
-    from storage.portfolio_db import add_to_watchlist, add_b1_candidate, record_b1_scan, record_watchlist_daily
+    """每日全市场扫描 — B1 + 趋势黄白线 + 缩量蓄爆 → 关注列表分层"""
+    import sys, io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8') if hasattr(sys.stdout,'buffer') else sys.stdout
 
+    from config.blacklist import blacklist as bl
+    from indicators.b1_calculator import compute_single
+    from indicators.trend_analyzer import TrendAnalyzer
+    from indicators.suo_bao_b1 import scan as suo_bao_scan
+    from storage.portfolio_db import (
+        add_to_watchlist, add_b1_candidate, record_b1_scan, record_watchlist_daily
+    )
+    from storage.db import get_db
+    from tracking.trend_tracker import detect_state_transition
+
+    db = get_db()
+    db.ensure_trading_calendar()
+    # 使用交易日历最新日期
+    today = db.conn.execute("SELECT MAX(date) FROM trading_calendar").fetchone()[0]
+
+    # Step 1: 获取股票列表
     codes = []
     label = ""
     if args.codes:
@@ -1614,59 +1536,218 @@ def cmd_scan(args):
         print("请指定 --name / --market / --codes")
         return
 
-    print(f"[Scan] {label}")
+    print(f"[Scan] {label} | date={today}")
     scan_id = None
     if args.auto_save:
-        scan_id = record_b1_scan("scan", label, len(codes), 0, 0, "", 0)
+        scan_id = record_b1_scan("market", label, len(codes), 0, 0, "", 0)
 
-    b1_count = near_count = err_count = 0
+    # 预加载名称
+    names = {r[0]: r[1] for r in db.conn.execute("SELECT code, name FROM stock_info").fetchall()}
+
+    # ─── 累计计数 ───
+    b1_count = err_count = 0
+    golden_cross = 0  # 金叉
+    turning_up = 0    # 拐头向上
+    bull_confirmed = 0  # 拐头→多头确认
+    bull_cautious = 0   # 多头→谨慎预警
+    suo_count = 0       # 缩量蓄爆
+    transitions = []    # 状态转移日志
+
+    print(f"[Scan] 开始遍历...")
     for i, code in enumerate(codes):
-        if i % 50 == 0:
-            print(f"  [{i+1}/{len(codes)}] B1:{b1_count} 近B1:{near_count} err:{err_count}")
-        candles = ensure_candles(code, required_days=args.days)
+        if i % 200 == 0:
+            print(f"  [{i+1}/{len(codes)}] B1:{b1_count} "
+                  f"金叉:{golden_cross} 拐头:{turning_up} 缩爆:{suo_count} err:{err_count}")
+
+        candles = db.get_candles(code, limit=args.days)
         if not candles or len(candles) < args.days:
             err_count += 1
             continue
-        from indicators.b1_calculator import compute_single
-        from indicators.suo_bao_b1 import scan as suo_bao_scan
+        candles = [c for c in candles if c.get('close') is not None]
+        if len(candles) < args.days:
+            err_count += 1
+            continue
+
+        name = names.get(code, code)
+
+        # ── B1 指标 ──
         ind = compute_single(code, candles)
         if not ind or ind.get("error"):
             err_count += 1
             continue
-        sb = suo_bao_scan(code, "", candles)
+
         sj = ind.get("信号", [])
         is_b1 = bool(sj or ind.get("基础B1"))
-        is_near = (not is_b1) and (ind.get("J") or 999) < 20
+
+        # ── 趋势黄白线 ──
+        trend = TrendAnalyzer(code, candles).compute()
+        trend_state = trend.get("state", "未知") if "error" not in trend else "未知"
+        trend_score = trend.get("score", 0) if "error" not in trend else 0
+        trend_cross = trend.get("cross") if "error" not in trend else None
+
+        # 查前一日趋势状态
+        prev_state = "未知"
+        if args.auto_save and scan_id:
+            prev_row = db.conn.execute(
+                "SELECT 趋势 FROM watchlist_daily WHERE code=? AND date<? ORDER BY date DESC LIMIT 1",
+                (code, today)
+            ).fetchone()
+            if prev_row and prev_row[0]:
+                prev_state = prev_row[0]
+
+        # 趋势信号
+        t_signals = trend.get("signals", []) if "error" not in trend else []
+        is_golden = trend_cross == "golden"
+        is_turning = trend_state == "拐头向上"
+        is_bull_confirm = prev_state == "拐头向上" and trend_state == "多头"
+        is_bull_cautious = prev_state == "多头" and trend_state == "谨慎"
+
+        if is_golden:
+            golden_cross += 1
+        if is_turning:
+            turning_up += 1
+        if is_bull_confirm:
+            bull_confirmed += 1
+        if is_bull_cautious:
+            bull_cautious += 1
+
+        # ── 缩量蓄爆 ──
+        sb = suo_bao_scan(code, name, candles)
         suo = sb.get("ok", False) if isinstance(sb, dict) else bool(sb)
-
-        if is_b1:
-            b1_count += 1
-            if args.auto_save and scan_id:
-                add_to_watchlist(code, "", source="scan", reason="B1", tags=["B1"], level=1)
-                add_b1_candidate(scan_id, code, "", label, "B1", ind)
-                record_watchlist_daily(code, ind)
-        elif is_near:
-            near_count += 1
-            if args.auto_save and scan_id:
-                add_to_watchlist(code, "", source="scan", reason="近B1", tags=["近B1"], level=2)
-                add_b1_candidate(scan_id, code, "", label, "near_B1", ind)
-                record_watchlist_daily(code, ind)
         if suo:
-            if args.auto_save and scan_id:
-                add_to_watchlist(code, "", source="scan", reason="缩量爆发", tags=["缩爆"], level=1)
+            suo_count += 1
 
-    from storage.db import get_db
-    if scan_id and (b1_count + near_count > 0):
-        db = get_db()
-        db.conn.execute("UPDATE b1_scan SET b1_count=?, near_b1_count=? WHERE scan_id=?", (b1_count, near_count, scan_id))
+        # ── DB 写入 ──
+        if args.auto_save and scan_id:
+            # 用 TrendAnalyzer 结果覆盖 B1 的趋势/白线/黄线字段
+            ind["趋势"] = trend_state                                  # ← B1→TrendAnalyzer
+            ind["白线"] = trend.get("白")                              # ← TrendAnalyzer 白线
+            ind["黄线"] = trend.get("黄")                              # ← TrendAnalyzer 黄线
+            ind["trend_score"] = trend_score
+            ind["trend_signals"] = ",".join(t_signals)
+            ind["trend_cross"] = trend_cross or ""
+            ind["trend_diff_pct"] = trend.get("差值_pct")
+
+            # 状态变更标记
+            sc = ""
+            if is_golden and prev_state not in ("多头",):
+                sc = "golden_cross_" + today
+            elif is_turning and prev_state not in ("拐头向上", "多头"):
+                sc = "trend_turn_up_" + today
+            elif is_bull_confirm:
+                sc = "trend_bull_" + today
+            elif is_bull_cautious:
+                sc = "trend_bear_" + today
+            elif trend_state != prev_state and prev_state != "未知":
+                sc = f"trend_{trend_state}_" + today
+            ind["status_change"] = sc
+
+            if is_b1:
+                b1_count += 1
+                add_to_watchlist(code, name, source="scan", reason="B1", tags=["B1"], level=1)
+                add_b1_candidate(scan_id, code, name, label, "B1", ind)
+            # 所有有K线的股票都写 watchlist_daily（记录趋势/黄白线/J值等）
+            record_watchlist_daily(code, ind)
+
+            # 趋势信号入库
+            if is_golden:
+                add_to_watchlist(code, name, source="trend", reason="金叉", tags=["趋势", "金叉"], level=1)
+            if is_turning:
+                add_to_watchlist(code, name, source="trend", reason="拐头向上", tags=["趋势", "拐头向上"], level=2)
+            if is_bull_cautious:
+                add_to_watchlist(code, name, source="trend", reason="顶部预警", tags=["趋势", "谨慎"], level=1)
+
+            # 趋势转移日志
+            if prev_state != trend_state and prev_state != "未知":
+                transitions.append({
+                    "code": code, "name": name,
+                    "prev": prev_state, "curr": trend_state,
+                    "cross": trend_cross or "",
+                    "score": trend_score,
+                })
+
+            # 缩爆入库
+            if suo:
+                add_to_watchlist(code, name, source="scan", reason="缩量爆发", tags=["缩爆"], level=1)
+        else:
+            # 非 auto_save 模式，纯计数
+            if is_b1:
+                b1_count += 1
+
+    # ─── 更新 b1_scan 表 ───
+    if scan_id and b1_count > 0:
+        db.conn.execute(
+            "UPDATE b1_scan SET b1_count=?, near_b1_count=0 WHERE scan_id=?",
+            (b1_count, scan_id)
+        )
         db.conn.commit()
 
-    print(f"\n===== 选股结果 =====")
-    print(f"总数:{len(codes)} ★B1:{b1_count} △近B1(J<20):{near_count} 错误/数据不足:{err_count}")
-    if b1_count > 0:
-        print(f"★ B1 已入库重点关注")
-    if near_count > 0:
-        print(f"△ 近B1 已入库普通关注")
+    # ─── 输出 ───
+    print(f"\n{'='*50}")
+    print(f"===== 每日扫描结果 =====")
+    print(f"日期: {today} | 总数: {len(codes)} | B1:{b1_count} | 错误:{err_count}")
+    print()
+    print(f"═══ 三大指标 ═══")
+    print(f"★ B1活跃: {b1_count}只")
+    print(f"══ 趋势黄白线 ══")
+    print(f"⊕ 金叉: {golden_cross}只  (已关注level=1)")
+    print(f"↗ 拐头向上: {turning_up}只  (已关注level=2)")
+    print(f"✓ 拐头→多头确认: {bull_confirmed}只")
+    print(f"⚠ 多头→谨慎预警: {bull_cautious}只")
+    print(f"══ 缩量蓄爆 ══")
+    print(f"⊙ 缩量蓄爆: {suo_count}只")
+
+    # 状态转移详情
+    if transitions:
+        print(f"\n═══ 趋势状态转移 ({len(transitions)}条) ═══")
+        for tr in transitions[:20]:
+            cross_tag = " ★金叉" if tr["cross"] == "golden" else ""
+            print(f"  {tr['code']} {tr['name'][:6]}  {tr['prev']} → {tr['curr']}{cross_tag}  (评分:{tr['score']})")
+
+    # B1 变化
+    if args.auto_save and scan_id:
+        prev_sid = db.conn.execute(
+            "SELECT MAX(scan_id) FROM b1_scan WHERE scan_id<? AND b1_count>0", (scan_id,)
+        ).fetchone()
+        if prev_sid and prev_sid[0]:
+            prev_b1 = {r[0] for r in db.conn.execute(
+                f"SELECT code FROM b1_candidate WHERE scan_id={prev_sid[0]} AND category='B1'"
+            ).fetchall()}
+            curr_b1 = {r[0] for r in db.conn.execute(
+                f"SELECT code FROM b1_candidate WHERE scan_id={scan_id} AND category='B1'"
+            ).fetchall()}
+            new_b1 = curr_b1 - prev_b1
+            lost_b1 = prev_b1 - curr_b1
+            if new_b1:
+                items = [c + ' ' + names.get(c, '') for c in sorted(new_b1)[:15]]
+                print(f"\n新进B1({len(new_b1)}只): {', '.join(items)}")
+            if lost_b1:
+                items2 = [c + ' ' + names.get(c, '') for c in sorted(lost_b1)[:15]]
+                print(f"B1消失({len(lost_b1)}只): {', '.join(items2)}")
+
+    # 关注列表统计
+    wl_total = db.conn.execute("SELECT COUNT(*) FROM watchlist WHERE status='active'").fetchone()[0]
+    wl_l1 = db.conn.execute("SELECT COUNT(*) FROM watchlist WHERE status='active' AND level=1").fetchone()[0]
+    wl_l2 = db.conn.execute("SELECT COUNT(*) FROM watchlist WHERE status='active' AND level=2").fetchone()[0]
+    print(f"\n关注列表: {wl_total}只 (重点{wl_l1} | 普通{wl_l2})")
+
+    # 持仓对齐
+    pos_codes = [r[0] for r in db.conn.execute("SELECT code FROM position WHERE total_qty>0").fetchall()]
+    print(f"\n═══ 持仓B1/趋势快照 ═══")
+    for c in pos_codes:
+        wl = db.conn.execute(
+            "SELECT close, J, B1_active, near_B1, 趋势, 评分, 超缩量 FROM watchlist_daily WHERE code=? AND date=?",
+            (c, today)
+        ).fetchone()
+        name = names.get(c, c)
+        if wl:
+            b1_lbl = "★B1" if wl[2] else ("△近" if wl[3] else "-")
+            s_lbl = " 缩爆" if wl[6] else ""
+            print(f"  {c} {name[:8]:8s}  {wl[0] or '?':>8}  J={wl[1] or '?':>5}  "
+                  f"趋势:{wl[4] or '-':>4}  评分:{wl[5] or '?'}  {b1_lbl}{s_lbl}")
+        else:
+            print(f"  {c} {name[:8]:8s}  (未覆盖)")
+    print()
 
 
 def cmd_data(args):
@@ -1793,6 +1874,151 @@ def cmd_find(args):
         print(f"\n△ 拐头向上(普通): {(', '.join(e['code']+'('+str(e['score'])+')' for e in tre_l2[:10]))}")
 
 
+def _aggregate_holdings_section(db, date_str: str) -> dict:
+    """聚合持仓分析所需数据，返回 dict 供 LLM prompt 拼接和报告渲染。"""
+    result = {
+        "has_positions": False,
+        "account_text": "",
+        "detail_text": "",
+        "sector_text": "",
+        "risk_text": "",
+        "account_data": {},
+        "positions": [],
+    }
+
+    # ── 账户快照 ──
+    as_row = db.conn.execute(
+        "SELECT total_asset, available_cash, stock_value, position_ratio, total_pnl, total_pnl_pct "
+        "FROM account_snapshot ORDER BY date DESC LIMIT 1"
+    ).fetchone()
+    if as_row:
+        result["account_data"] = {
+            "total_asset": as_row[0], "available_cash": as_row[1],
+            "stock_value": as_row[2], "position_ratio": as_row[3],
+            "total_pnl": as_row[4], "total_pnl_pct": as_row[5],
+        }
+
+    # ── 当前持仓 ──
+    pos_rows = db.conn.execute(
+        "SELECT code, name, avg_cost, total_qty, strategy, stop_loss, target_price "
+        "FROM position WHERE total_qty > 0 ORDER BY code"
+    ).fetchall()
+    if not pos_rows:
+        return result
+
+    result["has_positions"] = True
+
+    # 取最近交易日收盘价 & 持仓B1/趋势快照
+    codes = [r[0] for r in pos_rows]
+    placeholders = ",".join(["?"] * len(codes))
+    price_rows = db.conn.execute(
+        f"SELECT code, close FROM stock_daily WHERE code IN ({placeholders}) AND date<=? "
+        "GROUP BY code HAVING date=MAX(date)",
+        (*codes, date_str)
+    ).fetchall()
+    price_map = {r[0]: r[1] for r in price_rows}
+
+    # 从最新 watchlist_daily 取指标
+    wl_rows = db.conn.execute(
+        f"SELECT code, J, 趋势, 评分, B1_active, near_B1, signals, 超缩量 "
+        f"FROM watchlist_daily WHERE code IN ({placeholders}) AND date=?",
+        (*codes, date_str)
+    ).fetchall()
+    wl_map = {}
+    for r in wl_rows:
+        wl_map[r[0]] = {"J": r[1], "趋势": r[2], "评分": r[3], "B1_active": r[4],
+                        "near_B1": r[5], "signals": r[6], "超缩量": r[7]}
+
+    # 构建持仓明细
+    positions = []
+    total_mv = 0
+    for row in pos_rows:
+        code, name, cost, qty, strategy, stop_loss, target = row
+        close = price_map.get(code, 0)
+        mv = close * qty if close else 0
+        pnl_pct = ((close - cost) / cost * 100) if cost and close and cost > 0 else 0
+        total_mv += mv
+        wl = wl_map.get(code, {})
+        positions.append({
+            "code": code, "name": name or code, "cost": cost, "qty": qty,
+            "close": close, "mv": mv, "pnl_pct": pnl_pct,
+            "strategy": strategy or "", "stop_loss": stop_loss or 0, "target": target or 0,
+            "J": wl.get("J"), "趋势": wl.get("趋势", ""), "评分": wl.get("评分"),
+            "B1_active": wl.get("B1_active", 0), "near_B1": wl.get("near_B1", 0),
+            "signals": wl.get("signals", ""), "超缩量": wl.get("超缩量", 0),
+        })
+    result["positions"] = positions
+
+    # ── 账户总览文本 ──
+    acc = result["account_data"]
+    pnl_30 = db.conn.execute(
+        "SELECT COALESCE(SUM(pnl),0), COALESCE(AVG(pnl_pct),0) FROM trade_record "
+        "WHERE direction IN ('sell','t_sell','clear') AND trade_date >= date('now','-30 days')"
+    ).fetchone()
+    result["account_text"] = (
+        f"| 总资产 | 可用资金 | 股票市值 | 仓位% | 未实现盈亏 | 已实现盈亏(30日) |\n"
+        f"|--------|----------|----------|-------|-----------|-----------------|\n"
+        f"| {acc.get('total_asset','?'):.0f} | {acc.get('available_cash','?'):.0f} | "
+        f"{acc.get('stock_value','?'):.0f} | {acc.get('position_ratio','?')}% | "
+        f"{acc.get('total_pnl','?'):.0f} | {pnl_30[0] or 0:.0f} |"
+    ) if acc else "(账户快照未录入，请执行 holdings snapshot 保存)"
+
+    # ── 持仓明细表 ──
+    detail_lines = [
+        "| 代码 | 名称 | 成本 | 现价 | 盈亏% | 市值 | 策略 | J值 | B1 | 趋势 |",
+        "|------|------|------|------|-------|------|------|-----|----|------|",
+    ]
+    for p in sorted(positions, key=lambda x: x["mv"], reverse=True):
+        b1_label = "★B1" if p["B1_active"] else ("△近" if p["near_B1"] else "-")
+        detail_lines.append(
+            f"| {p['code']} | {p['name']} | {p['cost']:.2f} | {p['close']:.2f} | "
+            f"{p['pnl_pct']:+.1f}% | {p['mv']:.0f} | {p['strategy']} | "
+            f"{p['J'] if p['J'] is not None else '?'} | {b1_label} | {p['趋势']} |"
+        )
+    result["detail_text"] = "\n".join(detail_lines)
+
+    # ── 行业分布 ──
+    sector_dist = db.conn.execute(
+        f"SELECT COALESCE(si.sector_name,'未分类'), COUNT(*) as cnt, "
+        f"SUM(p.total_qty * COALESCE(ld.close, p.avg_cost)) as sector_mv "
+        f"FROM position p "
+        f"LEFT JOIN sector_index si ON p.code=si.code "
+        f"LEFT JOIN (SELECT code, close FROM stock_daily WHERE code IN ({placeholders}) "
+        f"AND date<=? GROUP BY code HAVING date=MAX(date)) ld ON p.code=ld.code "
+        f"WHERE p.total_qty > 0 "
+        f"GROUP BY si.sector_name ORDER BY sector_mv DESC",
+        (*codes, date_str)
+    ).fetchall()
+    if sector_dist:
+        total_for_pct = sum(r[2] or 0 for r in sector_dist)
+        slines = ["| 行业 | 持仓市值 | 占比 |", "|------|---------|------|"]
+        for r in sector_dist:
+            pct = (r[2] / total_for_pct * 100) if total_for_pct > 0 else 0
+            slines.append(f"| {r[0]} | {r[2] or 0:.0f} | {pct:.0f}% |")
+        result["sector_text"] = "\n".join(slines)
+
+    # ── 风险仓位 ──
+    risks = []
+    for p in positions:
+        reasons = []
+        if p["J"] is not None and p["J"] < 20 and p["pnl_pct"] < 0:
+            reasons.append(f"J={p['J']:.0f}<20且浮亏{p['pnl_pct']:+.1f}%")
+        if p["趋势"] in ("谨慎", "弱势"):
+            reasons.append(f"趋势转{p['趋势']}")
+        if p["stop_loss"] and p["close"] and p["close"] <= p["stop_loss"]:
+            reasons.append(f"触及止损价{p['stop_loss']:.2f}")
+        if reasons:
+            risks.append(f"- **{p['code']} {p['name']}**: {'; '.join(reasons)}")
+    # 行业集中度
+    for r in (sector_dist or []):
+        pct = (r[2] / total_for_pct * 100) if total_for_pct > 0 else 0
+        if pct > 30:
+            risks.append(f"- ⚠ 行业集中度: **{r[0]}** 占比 {pct:.0f}%，超过30%阈值")
+    result["risk_text"] = "\n".join(risks) if risks else "(无明显风险仓位)"
+
+    return result
+
+
 def cmd_market_report(args):
     """市场环境报告 — DB数据 + Tavily WebSearch + LLM整合 → MD存档 → 飞书"""
     import sys, io, os
@@ -1822,35 +2048,80 @@ def cmd_market_report(args):
             quotes.append({"code": code, "name": name, "price": 0, "change_pct": 0, "source": "none"})
 
     # B1
-    scan = db.conn.execute("SELECT b1_count, near_b1_count FROM b1_scan ORDER BY scan_id DESC LIMIT 1").fetchone()
-    b1_count = scan[0] if scan else 0
-    near_count = scan[1] if scan else 0
+    scan = db.conn.execute("SELECT scan_id, b1_count, near_b1_count FROM b1_scan ORDER BY scan_id DESC LIMIT 1").fetchone()
+    b1_count = scan[1] if scan else 0
+    near_count = scan[2] if scan else 0
+    scan_id = scan[0] if scan else None
     wl_l1 = db.conn.execute("SELECT COUNT(*) FROM watchlist WHERE level=1 AND status='active'").fetchone()[0]
     wl_l2 = db.conn.execute("SELECT COUNT(*) FROM watchlist WHERE level=2 AND status='active'").fetchone()[0]
 
-    # 板块排名：取实际有candidate记录的最新批次
+    # 板块排名
     sector_b1 = {}
-    scan_id = db.conn.execute(
-        "SELECT scan_id FROM b1_scan WHERE b1_count>0 "
-        "AND (SELECT COUNT(*) FROM b1_candidate WHERE scan_id=b1_scan.scan_id AND category='B1')>0 "
-        "ORDER BY scan_id DESC LIMIT 1"
-    ).fetchone()
-    if scan_id and scan_id[0]:
+    if scan_id:
         for r in db.conn.execute(
             "SELECT si.sector_name, COUNT(*) as cnt FROM b1_candidate bc "
             "LEFT JOIN sector_index si ON bc.code=si.code "
-            f"WHERE bc.scan_id={scan_id[0]} AND bc.category='B1' "
+            f"WHERE bc.scan_id={scan_id} AND bc.category='B1' "
             "GROUP BY si.sector_name ORDER BY cnt DESC LIMIT 15"
         ).fetchall():
             sector_b1[r[0] or "未分类"] = r[1]
 
-    # B1变化（新进/消失）
-    new_b1 = []
+    # 板块B1增减（对比前次）
+    sector_delta = {}
     sids = [r[0] for r in db.conn.execute("SELECT DISTINCT scan_id FROM b1_scan WHERE b1_count>0 ORDER BY scan_id DESC LIMIT 2").fetchall()]
     if len(sids) >= 2:
-        curr = {r[0] for r in db.conn.execute(f"SELECT DISTINCT code FROM b1_candidate WHERE scan_id={sids[0]} AND category='B1'").fetchall()}
-        prev = {r[0] for r in db.conn.execute(f"SELECT DISTINCT code FROM b1_candidate WHERE scan_id={sids[1]} AND category='B1'").fetchall()}
-        new_b1 = list(curr - prev)
+        curr_sec = {}
+        for r in db.conn.execute(
+            "SELECT COALESCE(si.sector_name,'未分类'), COUNT(*) FROM b1_candidate bc "
+            "LEFT JOIN sector_index si ON bc.code=si.code "
+            f"WHERE bc.scan_id={sids[0]} AND bc.category='B1' GROUP BY si.sector_name"
+        ).fetchall():
+            curr_sec[r[0]] = r[1]
+        prev_sec = {}
+        for r in db.conn.execute(
+            "SELECT COALESCE(si.sector_name,'未分类'), COUNT(*) FROM b1_candidate bc "
+            "LEFT JOIN sector_index si ON bc.code=si.code "
+            f"WHERE bc.scan_id={sids[1]} AND bc.category='B1' GROUP BY si.sector_name"
+        ).fetchall():
+            prev_sec[r[0]] = r[1]
+        for s in set(list(curr_sec.keys()) + list(prev_sec.keys())):
+            d = curr_sec.get(s, 0) - prev_sec.get(s, 0)
+            if d != 0:
+                sector_delta[s] = d
+
+    # B1变化（新进/消失，带名称）
+    new_b1 = []
+    lost_b1 = []
+    if len(sids) >= 2:
+        curr = {}
+        for r in db.conn.execute(f"SELECT code, name FROM b1_candidate WHERE scan_id={sids[0]} AND category='B1'").fetchall():
+            curr[r[0]] = r[1]
+        prev = {}
+        for r in db.conn.execute(f"SELECT code, name FROM b1_candidate WHERE scan_id={sids[1]} AND category='B1'").fetchall():
+            prev[r[0]] = r[1]
+        new_b1 = [(c, curr[c]) for c in (set(curr.keys()) - set(prev.keys()))]
+        lost_b1 = [(c, prev[c]) for c in (set(prev.keys()) - set(curr.keys()))]
+
+    # 趋势状态转移
+    transitions = {"weak_to_turning": 0, "golden_cross": 0, "turning_to_bull": 0, "bull_to_cautious": 0}
+    state_lines = db.conn.execute(
+        f"SELECT status_change FROM watchlist_daily WHERE date=? AND status_change != ''", (date_str,)
+    ).fetchall()
+    for sl in state_lines:
+        sc = sl[0]
+        if "trend_turn_up" in sc or "拐头" in sc: transitions["weak_to_turning"] += 1
+        if "golden_cross" in sc or "金叉" in sc: transitions["golden_cross"] += 1
+        if "trend_bull" in sc or "多头确认" in sc: transitions["turning_to_bull"] += 1
+        if "trend_bear" in sc or "谨慎" in sc: transitions["bull_to_cautious"] += 1
+
+    # 缩量蓄爆
+    suo_bao_list = []
+    sb_rows = db.conn.execute(
+        f"SELECT wd.code, COALESCE(si.name, wd.code) FROM watchlist_daily wd "
+        f"LEFT JOIN stock_info si ON wd.code=si.code "
+        f"WHERE wd.date=? AND wd.超缩量=1", (date_str,)
+    ).fetchall()
+    suo_bao_list = [(r[0], r[1]) for r in sb_rows]
 
     # 历史上下文
     base_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "references", "market_journal")
@@ -1864,73 +2135,224 @@ def cmd_market_report(args):
         except Exception:
             pass
 
-    # ==========================================
-    # 2. Web Search (Tavily)
-    # ==========================================
-    search_text = ""
-    if not args.no_search:
-        os.environ.setdefault("TAVILY_API_KEY", "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")
-        try:
-            from data_source.web_search import get_market_news, get_sector_news
-            mn = get_market_news()
-            if mn:
-                search_text += "### 今日热点\n" + mn + "\n"
-            # 找B1最集中的板块做深度搜索
-            top_sectors = sorted(sector_b1, key=sector_b1.get, reverse=True)[:3]
-            for s in top_sectors:
-                sn = get_sector_news(s)
-                if sn:
-                    search_text += f"### {s}\n{sn}\n"
-        except Exception as e:
-            search_text = f"(搜索失败: {e})"
+    # ── 持仓数据 ──
+    holdings = _aggregate_holdings_section(db, date_str)
 
     # ==========================================
-    # 3. LLM 整合
+    # 2. 板块涨跌幅（从 stock_daily 聚合，非 B1 密度）
     # ==========================================
-    prompt = f"""你是资深A股市场策略分析师。请基于以下数据生成今日市场环境报告。
-
-日期：{date_str}
-
-## 指数行情
-{chr(10).join(f'- {q.get("name","?")}: {q.get("price","?")} ({q.get("change_pct",0):+.2f}%)' for q in quotes)}
-
-## B1选股统计
-B1活跃: {b1_count}只 | 近B1(J<20): {near_count}只 | 重点: {wl_l1}只 | 普通: {wl_l2}只
-新进B1: {', '.join(new_b1[:15]) if new_b1 else '无'}
-
-## 板块B1密度（前15）
-{chr(10).join(f'- {k}: {v}只B1' for k,v in list(sector_b1.items())[:15])}
-
-## Web搜索结果
-{search_text or '(未搜索)'}
-
-## 历史市场日记
-{history[:1500] or '(无)'}
-
-请输出Markdown格式的市场环境报告，结构如下：
-### 大势研判
-（指数表现+成交量+一句话判断）
-### 主线板块
-（B1密度最高的板块，判断是延续还是切换）
-### 关注变化
-（新进B1/消失B1/趋势状态转移）
-### 风险提示
-（科技拥挤度/地缘/季节性/其他）
-### 明日关注
-不构成投资建议。直接输出分析内容，不要加一级标题。"""
-
-    llm_text = ""
+    sector_perf = []
     try:
-        from llm.client import chat
-        resp = chat([{"role":"system","content":"你是资深A股市场策略分析师"},{"role":"user","content":prompt}], max_tokens=4096)
-        if resp:
-            llm_text = resp["content"]
+        for r in db.conn.execute(
+            "SELECT COALESCE(si.sector_name,'未分类'), "
+            "ROUND(AVG(sd.change_pct),2) as avg_chg, COUNT(*) as cnt "
+            "FROM stock_daily sd LEFT JOIN sector_index si ON sd.code=si.code "
+            f"WHERE sd.date='{date_str}' AND sd.change_pct IS NOT NULL "
+            "GROUP BY si.sector_name HAVING cnt>=5 ORDER BY avg_chg DESC"
+        ).fetchall():
+            sector_perf.append({"name": r[0], "chg": r[1], "cnt": r[2]})
     except Exception:
         pass
 
     # ==========================================
+    # 3. Web Search (Tavily) → 用 LLM 总结而非裸贴
+    # ==========================================
+    search_raw = ""
+    if not args.no_search:
+        os.environ.setdefault("TAVILY_API_KEY", "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")
+        try:
+            from data_source.web_search import get_market_news
+            mn = get_market_news()
+            if mn:
+                search_raw = mn[:1500]  # 截断给 LLM 用
+        except Exception:
+            pass
+
+    # ==========================================
+    # 4. LLM Prompt — 市场驱动因子分析（量/价/换手/分化），B1 仅作辅助
+    # ==========================================
+    # 成交量 & 市场广度（LLM需要，提前算好）
+    vol_today = db.conn.execute(
+        f"SELECT SUM(volume) FROM stock_daily WHERE date='{date_str}'"
+    ).fetchone()[0] or 0
+    prev_date = db.conn.execute(
+        f"SELECT MAX(date) FROM stock_daily WHERE date<'{date_str}'"
+    ).fetchone()[0]
+    prev_vol = db.conn.execute(
+        f"SELECT SUM(volume) FROM stock_daily WHERE date=? ", (prev_date,)
+    ).fetchone()[0] if prev_date else 0
+    vol_ratio = vol_today / prev_vol if prev_vol > 0 else 1
+    up_cnt = db.conn.execute(
+        f"SELECT COUNT(*) FROM stock_daily WHERE date='{date_str}' AND change_pct>0"
+    ).fetchone()[0]
+    down_cnt = db.conn.execute(
+        f"SELECT COUNT(*) FROM stock_daily WHERE date='{date_str}' AND change_pct<0"
+    ).fetchone()[0]
+    breadth = up_cnt / (up_cnt + down_cnt) * 100 if (up_cnt + down_cnt) > 0 else 50
+    vol_text = (
+        f"成交量: {vol_today/1e8:.1f}亿股 | 前日({prev_date}): {prev_vol/1e8:.1f}亿股 | 量比: {vol_ratio:.2f}\n"
+        f"涨跌: 涨{up_cnt} / 跌{down_cnt} | 涨跌比: {breadth:.1f}%"
+    )
+
+    # 缩量蓄爆（从 watchlist 读取，非 watchlist_daily.超缩量）
+    suo_from_wl = db.conn.execute(
+        "SELECT COUNT(*) FROM watchlist WHERE source='scan' AND reason LIKE '%缩量%' AND status='active'"
+    ).fetchone()[0]
+
+    # 板块涨跌 Top/Bottom
+    sp_up = [s for s in sector_perf if s["chg"] > 0][:8]
+    sp_down = [s for s in sector_perf if s["chg"] < 0][-8:]
+    sp_up_text = "\n".join(f"- {s['name']}: +{s['chg']:.2f}% ({s['cnt']}只)" for s in sp_up) if sp_up else "(无)"
+    sp_down_text = "\n".join(f"- {s['name']}: {s['chg']:.2f}% ({s['cnt']}只)" for s in sp_down) if sp_down else "(无)"
+
+    # B1 板块密度（仅作辅助参考）
+    sector_b1_text = "\n".join(
+        f"- {k}: {v}只B1 ({'+' if sector_delta.get(k,0)>=0 else ''}{sector_delta.get(k,0)})"
+        if k in sector_delta else f"- {k}: {v}只B1"
+        for k, v in list(sector_b1.items())[:10]
+    )
+    suo_bao_text = ", ".join(f"{c} {n}" for c, n in suo_bao_list[:10]) if suo_bao_list else "无"
+
+    # 趋势状态分布
+    trend_dist = {}
+    for r in db.conn.execute(
+        f"SELECT 趋势, COUNT(*) FROM watchlist_daily WHERE date=? AND 趋势 IS NOT NULL AND 趋势!='' AND 趋势!='未知' GROUP BY 趋势",
+        (date_str,)
+    ).fetchall():
+        trend_dist[r[0]] = r[1]
+
+    prompt = f"""你是资深A股市场策略分析师。请基于以下真实数据做市场研判。
+
+日期：{date_str}
+
+## 核心数据 — 指数行情
+{chr(10).join(f'- {q.get("name","?")}: {q.get("price","?")} ({q.get("change_pct",0):+.2f}%)' for q in quotes)}
+
+## 核心数据 — 量能 & 广度
+{vol_text}
+
+## 核心数据 — 板块涨跌（涨幅前8 / 跌幅前8）
+**涨幅居前:**
+{sp_up_text}
+**跌幅居前:**
+{sp_down_text}
+
+## 核心数据 — 市场广度
+趋势多头: {trend_dist.get('多头',0)}只 | 空头: {trend_dist.get('空头',0)}只
+多头→谨慎预警: {transitions['bull_to_cautious']}只 | 弱势→拐头向上: {transitions['weak_to_turning']}只
+金叉出现: {transitions['golden_cross']}只 | 缩量蓄爆: {suo_from_wl}只
+
+## 辅助数据 — B1信号（仅为买点参考，非走势判断依据）
+B1活跃: {b1_count}只 | 近B1: {near_count}只
+板块B1密度: {sector_b1_text[:800]}
+缩量蓄爆: {suo_bao_text[:300]}
+
+## 辅助数据 — Web搜索
+{search_raw or '(未搜索)'}
+
+## 你的持仓
+### 账户
+{holdings['account_text']}
+### 持仓明细
+{holdings['detail_text']}
+### 风险仓位
+{holdings['risk_text']}
+
+## 历史日记
+{history[:1000] or '(无)'}
+
+---
+
+请按以下结构分析（二级标题，≥3段/节）：
+
+### 大势研判
+从成交量变化 + 涨跌家数 + 指数分化出发，判断：
+- 量能是放大还是萎缩？放量涨/缩量跌/放量跌？
+- 今天普涨还是分化？哪些风格（大盘/中小创/科创）在主导？
+- 一句话定性（≤30字）
+
+### 板块轮动
+- 今日领涨板块是否与昨日一致？轮动速度如何？
+- 领涨板块的驱动逻辑（结合 Web 搜索信息）
+- 领跌板块的风险信号
+
+### 持仓诊断
+- 你的持仓分布在哪些板块？与今日领涨/领跌板块的对齐度
+- 趋势状态恶化的持仓点名（空头、谨慎、J值极端）
+- 整体仓位是否合理
+
+### 风险提示
+（≥3条具体风险，每条有数据+等级支撑）
+
+### 明日关注
+（3-5个观察点，含触发条件）
+
+规则：
+- 不要一级标题。不编造数字。客观理性。
+- B1 只是买点信号，不应作为市场走势判断的核心依据。
+- 结尾: "> 不构成投资建议。" """
+
+    llm_text = ""
+    if not args.no_llm:
+        try:
+            from llm.client import chat
+            resp = chat(
+                [{"role": "system",
+                  "content": "你是资深A股策略分析师。分析框架：量价关系→指数分化→板块轮动→市场广度→持仓对齐。成交量是最重要的市场语言。B1仅作买点参考。输出专业客观。"},
+                 {"role": "user", "content": prompt}],
+                max_tokens=4096, role="analyst"
+            )
+            if resp:
+                llm_text = resp["content"]
+        except Exception as e:
+            llm_text = f"(LLM 调用失败: {e})"
+
+    # ==========================================
     # 4. 存储
     # ==========================================
+    new_b1_table = "\n".join(
+        f"| {c} | {n} |" for c, n in new_b1[:20]
+    ) if new_b1 else "无"
+    lost_b1_table = "\n".join(
+        f"| {c} | {n} |" for c, n in lost_b1[:20]
+    ) if lost_b1 else "无"
+    sb_table = "\n".join(
+        f"| {c} | {n} |" for c, n in suo_bao_list[:15]
+    ) if suo_bao_list else "无"
+
+    # 全量B1列表（含名称+J+趋势+标记是否新进）
+    new_b1_set = set(c for c, n in new_b1)
+    all_b1_rows = db.conn.execute(
+        f"SELECT bc.code, COALESCE(si.name,bc.code), bc.J, bc.趋势, bc.评分, bc.signals "
+        f"FROM b1_candidate bc LEFT JOIN stock_info si ON bc.code=si.code "
+        f"WHERE bc.scan_id={scan_id} AND bc.category='B1' "
+        f"ORDER BY bc.J"
+    ).fetchall()
+    # 信号列转义：JSON → 逗号分隔，截断，转义 |
+    def _sig_clean(raw):
+        if not raw: return '-'
+        try:
+            import json as _json
+            arr = _json.loads(raw) if isinstance(raw, str) else raw
+            return ','.join(str(x) for x in arr)[:30]
+        except:
+            return str(raw)[:30].replace('|', '/')
+    b1_full_table = "\n".join(
+        f"| {r[0]} | {r[1][:8]} | {r[2] or '?'} | {r[3] or '-'} | {r[4] or '?'} | "
+        f"{'🆕' if r[0] in new_b1_set else ''} | {_sig_clean(r[5])} |"
+        for r in all_b1_rows
+    )
+
+    # 板块涨跌表格
+    sp_up_display = [s for s in sector_perf if s["chg"] > 0][:10]
+    sp_down_display = [s for s in sector_perf if s["chg"] < 0][-10:]
+    sp_table = "\n".join(
+        f"| {s['name']} | +{s['chg']:.2f}% | {s['cnt']}只 |" for s in sp_up_display
+    ) if sp_up_display else "无"
+    sp_down_table = "\n".join(
+        f"| {s['name']} | {s['chg']:.2f}% | {s['cnt']}只 |" for s in sp_down_display
+    ) if sp_down_display else "无"
+
     report = f"""# 市场环境报告 — {date_str}
 
 ## 一、指数行情
@@ -1939,29 +2361,65 @@ B1活跃: {b1_count}只 | 近B1(J<20): {near_count}只 | 重点: {wl_l1}只 | �
 |------|------|------|
 {chr(10).join(f'| {q.get("name","?")} | {q.get("price","?")} | {q.get("change_pct",0):+.2f}% |' for q in quotes)}
 
-## 二、B1统计
+## 二、量价概览
 
-- ★ B1活跃: {b1_count}只
-- △ 近B1(J<20): {near_count}只
-- 重点关注: {wl_l1}只 | 普通关注: {wl_l2}只
+{vol_text}
 
-## 三、板块B1密度
+## 三、板块涨跌
 
-| 板块 | B1数 |
+### 涨幅居前
+| 板块 | 涨跌 | 样本数 |
+|------|------|--------|
+{sp_table}
+
+### 跌幅居前
+| 板块 | 涨跌 | 样本数 |
+|------|------|--------|
+{sp_down_table}
+
+## 四、趋势状态
+
+| 状态 | 数量 |
 |------|------|
-{chr(10).join(f'| {k} | {v} |' for k,v in list(sector_b1.items())[:15])}
+| 多头 | {trend_dist.get('多头',0)}只 |
+| 空头 | {trend_dist.get('空头',0)}只 |
+| 谨慎 | {trend_dist.get('谨慎',0)}只 |
+| 拐头向上 | {trend_dist.get('拐头向上',0)}只 |
+| 纠葛 | {trend_dist.get('纠葛',0)}只 |
 
-## 四、WebSearch
+| 转移 | 数量 |
+|------|------|
+| 弱势→拐头 | {transitions['weak_to_turning']} |
+| 金叉 | {transitions['golden_cross']} |
+| 多头→谨慎 | {transitions['bull_to_cautious']} |
+| 缩量蓄爆 | {suo_from_wl} |
 
-{search_text or '(未搜索)'}
+## 五、★ B1活跃 ({b1_count}只)
+(🆕=新进，按J值升序)
+| 代码 | 名称 | J | 趋势 | 评分 | 标记 | 信号 |
+|------|------|---|---|------|------|------|
+{b1_full_table}
 
-## 五、LLM解读
+## 六、持仓快照
 
-{llm_text or '(LLM未配置)'}
+### 账户总览
+{holdings['account_text']}
+
+### 持仓明细
+{holdings['detail_text']}
+
+{('### 行业分布\n' + holdings['sector_text']) if holdings['sector_text'] else ''}
+
+{('### ⚠ 风险仓位\n' + holdings['risk_text']) if holdings.get('risk_text') and holdings['risk_text'] != '(无明显风险仓位)' else ''}
+
+## 七、LLM市场解读
+
+{llm_text or '(LLM未配置/--no-llm 跳過)'}
 
 ---
 
-> 数据源: 掘金MyQuant/腾讯/baostock/Tavily | 生成: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+> 数据源: 掘金MyQuant/腾讯/baostock/Tavily/DeepSeek | 生成: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+> 不构成投资建议。
 """
     # 保存
     daily_path = os.path.join(base_dir, f"{date_str}.md")
@@ -1972,26 +2430,507 @@ B1活跃: {b1_count}只 | 近B1(J<20): {near_count}只 | 重点: {wl_l1}只 | �
         f.write(report)
 
     print(report)
+    print(f"\n[Market Report] 已保存: {daily_path}")
 
     # ==========================================
-    # 5. 飞书
+    # 5. 飞书发布
     # ==========================================
-    if not args.output:  # output flag is reused as --no-publish equivalent
+    if args.publish:
+        from reporting.feishu_publisher import publish_report, notify_scan_complete
+        url = publish_report(daily_path, title=f"市场环境报告 — {date_str}")
+        if url:
+            print(f"[Feishu] 文档: {url}")
+            # 发 IM 通知 + 链接
+            try:
+                import subprocess as sp
+                sp.run(["lark-cli", "im", "+messages-send", "--as", "bot",
+                        "--user-id", "ou_d55b9054133a1e411d6c074e2f6eb11c",
+                        "--msg-type", "interactive",
+                        "--content", (
+                            '{{"config":{{"wide_screen_mode":true}},"header":{{"title":{{"tag":"plain_text",'
+                            f'"content":"市场环境报告 {date_str}"}},"template":"blue"}},'
+                            '"elements":[{{"tag":"markdown","content":"指数涨跌 + B1({b1_count}只) + 板块排名 + '
+                            f'持仓分析 + LLM解读\\n[📄 查看完整报告]({url})"}}]}}'
+                        )], timeout=10)
+            except Exception:
+                pass
+
+
+def cmd_weekend_news(args):
+    """周末外环境报告 — 6维度Tavily搜索 + LLM整合 → 下周交易前瞻"""
+    import sys, io, os
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8') if hasattr(sys.stdout,'buffer') else sys.stdout
+    from datetime import datetime, timedelta
+
+    base_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "references", "weekend_news")
+    os.makedirs(base_dir, exist_ok=True)
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    # 找本周末（周五/周六）
+    week_label = datetime.now().strftime("%Y-W%W")
+
+    print(f"[Weekend News] 启动 6 维度 Tavily 搜索...")
+
+    # ==========================================
+    # 1. 多维度搜索（并行）
+    # ==========================================
+    os.environ.setdefault("TAVILY_API_KEY", "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")
+    search_results = {}
+    try:
+        from data_source.web_search import run_weekend_news_sweep
+        search_results = run_weekend_news_sweep(days=7)
+        for key, (label, text) in search_results.items():
+            status = "✓" if text and "(无结果)" not in text and "(搜索失败" not in text else "✗"
+            preview = text[:80].replace("\n", " ") if text else ""
+            print(f"  [{status}] {label}: {preview}...")
+    except Exception as e:
+        print(f"[Weekend News] 搜索失败: {e}")
+        search_results = {}
+
+    # ==========================================
+    # 2. 拼接搜索上下文
+    # ==========================================
+    search_context_text = ""
+    dimension_order = ["weekend", "macro", "geopolitical", "global_markets", "policy", "catalysts"]
+    for key in dimension_order:
+        if key in search_results:
+            label, text = search_results[key]
+            search_context_text += f"\n### {label}\n{text}\n"
+
+    if not search_context_text.strip():
+        search_context_text = "(所有维度搜索无结果)"
+
+    # ==========================================
+    # 3. LLM 整合
+    # ==========================================
+    prompt = f"""你是资深宏观策略分析师。请基于以下周末外环境搜索结果，生成周末外环境报告。
+
+日期：{today_str}（周末）
+
+## 六维度搜索结果
+{search_context_text}
+
+请按以下结构输出（Markdown格式，从二级标题开始）：
+
+### 全球宏观环境
+（美联储政策预期/通胀趋势/全球增长格局。≥2段）
+
+### 地缘政治风险
+（中美关系/贸易关税/科技制裁/地区冲突。标注风险等级。≥2段）
+
+### 全球市场表现
+（美股/港股/商品/外汇 最新走势。本周关键数据。≥2段）
+
+### 国内政策动向
+（证监会/央行/产业政策/重要会议。对A股的影响。≥2段）
+
+### 行业催化梳理
+（哪些行业有正面催化剂，哪些有利空。按行业分类。≥2段）
+
+### 下周交易前瞻
+（基于以上信息，对下周A股做出前瞻性判断。关注的时间节点/事件/数据发布日。
+3-5个具体观察点，每个带触发条件。≥3段）
+
+输出规则：
+- 只输出分析内容，不要一级标题
+- 所有信息需标注来源维度，不得编造
+- 客观理性，不喊口号
+- 结尾固定: "> 不构成投资建议。\n> 数据源: Tavily Search / DeepSeek | 生成: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+"""
+
+    llm_text = ""
+    if not args.no_llm:
         try:
-            # 发飞书消息
-            import subprocess as sp
-            msg = f"""市场环境报告({date_str})
-指数涨跌 + B1统计{b1_count}只 + 板块排名 + WebSearch + LLM解读
-完整报告: {daily_path}"""
-            sp.run(["lark-cli", "im", "+messages-send", "--as", "bot",
-                    "--user-id", "ou_d55b9054133a1e411d6c074e2f6eb11c",
-                    "--markdown", msg], timeout=10)
+            from llm.client import chat
+            resp = chat(
+                [{"role": "system",
+                  "content": "你是资深宏观策略分析师，擅长从全球宏观、地缘政治、政策面、行业催化等多个维度研判A股下周走势。输出专业客观。"},
+                 {"role": "user", "content": prompt}],
+                max_tokens=4096, role="analyst"
+            )
+            if resp:
+                llm_text = resp["content"]
+        except Exception as e:
+            llm_text = f"(LLM 调用失败: {e})"
+
+    # ==========================================
+    # 4. 生成报告
+    # ==========================================
+    report = f"""# 周末外环境报告 — {today_str}
+
+## 搜索维度覆盖
+
+| 维度 | 状态 |
+|------|------|
+"""
+    for key in dimension_order:
+        if key in search_results:
+            label, text = search_results[key]
+            ok = text and "(无结果)" not in text and "(搜索失败" not in text
+            report += f"| {label} | {'✓ 有结果' if ok else '✗ 无数据'} |\n"
+    report += f"""
+---
+
+## LLM 分析
+
+{llm_text or '(LLM未配置/--no-llm 跳过)'}
+
+---
+
+## 原始搜索摘要
+
+{search_context_text}
+
+---
+
+> 数据源: Tavily Search / DeepSeek (analyst+thinking) | 生成: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+"""
+
+    # 保存
+    daily_path = os.path.join(base_dir, f"{today_str}.md")
+    current_path = os.path.join(base_dir, "current.md")
+    with open(daily_path, 'w', encoding='utf-8') as f:
+        f.write(report)
+    with open(current_path, 'w', encoding='utf-8') as f:
+        f.write(report)
+
+    print(report)
+    print(f"\n[Weekend News] 已保存: {daily_path}")
+
+    # ==========================================
+    # 5. 飞书发布
+    # ==========================================
+    if args.publish:
+        from reporting.feishu_publisher import publish_report
+        url = publish_report(daily_path, title=f"周末外环境报告 — {today_str}")
+        if url:
+            print(f"[Feishu] 文档: {url}")
+            try:
+                import subprocess as sp
+                sp.run(["lark-cli", "im", "+messages-send", "--as", "bot",
+                        "--user-id", "ou_d55b9054133a1e411d6c074e2f6eb11c",
+                        "--msg-type", "interactive",
+                        "--content", (
+                            '{{"config":{{"wide_screen_mode":true}},"header":{{"title":{{"tag":"plain_text",'
+                            f'"content":"周末外环境报告 {today_str}"}},"template":"blue"}},'
+                            '"elements":[{{"tag":"markdown","content":"全球宏观/地缘/政策/行业催化 '
+                            f'→ 下周交易前瞻\\n[📄 查看完整报告]({url})"}}]}}'
+                        )], timeout=10)
+            except Exception:
+                pass
+
+
+def cmd_weekend_review(args):
+    """周末复盘 — 本周数据回顾 + 经验教训 + 下周计划"""
+    import sys, io, os
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8') if hasattr(sys.stdout,'buffer') else sys.stdout
+    from datetime import datetime, timedelta
+
+    base_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "references", "weekly_review")
+    os.makedirs(base_dir, exist_ok=True)
+    today = datetime.now()
+    today_str = today.strftime("%Y-%m-%d")
+
+    # 确定复盘周范围：如果今天在周初/周末，复盘上周；周中以后复盘本周
+    weekday = today.weekday()  # 0=Monday ... 6=Sunday
+    if args.week:
+        # 手动指定：取该日期的周一
+        ref = datetime.strptime(args.week, "%Y-%m-%d")
+        monday = ref - timedelta(days=ref.weekday())
+        friday = monday + timedelta(days=4)
+    elif weekday <= 1:  # 周一或周二 → 复盘上周
+        # 上周一 = today - (weekday + 7) 天
+        monday = today - timedelta(days=weekday + 7)
+        friday = monday + timedelta(days=4)
+    elif weekday >= 5:  # 周末 → 复盘刚过去的这周
+        monday = today - timedelta(days=weekday)
+        friday = monday + timedelta(days=4)
+    else:  # 周三~周五 → 复盘本周
+        monday = today - timedelta(days=weekday)
+        friday = monday + timedelta(days=4)
+    monday_str = monday.strftime("%Y-%m-%d")
+    friday_str = friday.strftime("%Y-%m-%d")
+    week_label = f"{monday_str} ~ {friday_str}"
+    print(f"[Weekend Review] 复盘周期: {week_label}")
+
+    from storage.db import get_db
+    db = get_db()
+
+    # ==========================================
+    # 1. 本周数据聚合
+    # ==========================================
+
+    # ── 指数周表现 ──
+    index_weekly = []
+    try:
+        from data_source.quote_fetcher import TRACKED_INDEXES
+        for code, name in TRACKED_INDEXES.items():
+            rows = db.conn.execute(
+                "SELECT date, close, change_pct FROM index_daily WHERE code=? AND date BETWEEN ? AND ? ORDER BY date",
+                (code, monday_str, friday_str)
+            ).fetchall()
+            if rows:
+                week_open = rows[0][1]
+                week_close = rows[-1][1]
+                week_chg = (week_close - week_open) / week_open * 100 if week_open else 0
+                # 每日涨跌
+                daily = " → ".join(f"{r[2]:+.2f}%" if r[2] else "?" for r in rows)
+                index_weekly.append({
+                    "name": name, "code": code, "week_open": week_open, "week_close": week_close,
+                    "week_chg": week_chg, "daily": daily, "days": len(rows)
+                })
+    except Exception:
+        pass
+
+    # ── 持仓周表现 ──
+    holdings_weekly = []
+    pos_rows = db.conn.execute(
+        "SELECT code, name, avg_cost, total_qty, strategy FROM position WHERE total_qty > 0"
+    ).fetchall()
+    for pr in pos_rows:
+        code, name, cost, qty, strategy = pr
+        rows = db.conn.execute(
+            "SELECT date, close FROM stock_daily WHERE code=? AND date BETWEEN ? AND ? ORDER BY date",
+            (code, monday_str, friday_str)
+        ).fetchall()
+        if rows:
+            week_open_c = rows[0][1]
+            week_close_c = rows[-1][1]
+            chg = (week_close_c - week_open_c) / week_open_c * 100 if week_open_c else 0
+            pnl = (week_close_c - cost) / cost * 100 if cost else 0
+            holdings_weekly.append({
+                "code": code, "name": name or code, "cost": cost, "qty": qty,
+                "strategy": strategy or "", "week_open": week_open_c,
+                "week_close": week_close_c, "week_chg": chg, "total_pnl_pct": pnl,
+            })
+
+    # ── 交易记录 ──
+    trade_weekly = []
+    tx_rows = db.conn.execute(
+        "SELECT trade_date, code, name, direction, qty, price, pnl, pnl_pct, reason "
+        "FROM trade_record WHERE trade_date BETWEEN ? AND ? ORDER BY trade_date, id",
+        (monday_str, friday_str)
+    ).fetchall()
+    for tx in tx_rows:
+        trade_weekly.append({
+            "date": tx[0], "code": tx[1], "name": tx[2], "direction": tx[3],
+            "qty": tx[4], "price": tx[5], "pnl": tx[6], "pnl_pct": tx[7], "reason": tx[8],
+        })
+
+    # ── B1 扫描历史 ──
+    b1_weekly = []
+    b1_rows = db.conn.execute(
+        "SELECT scan_date, b1_count, near_b1_count, total_scanned, elapsed_sec "
+        "FROM b1_scan WHERE scan_date BETWEEN ? AND ? ORDER BY scan_date",
+        (monday_str, friday_str)
+    ).fetchall()
+    for br in b1_rows:
+        b1_weekly.append({
+            "date": br[0], "b1_count": br[1], "near_count": br[2],
+            "scanned": br[3], "elapsed": br[4],
+        })
+
+    # ── 账户快照 ──
+    acc_snaps = db.conn.execute(
+        "SELECT date, total_asset, available_cash, stock_value, position_ratio, total_pnl, total_pnl_pct "
+        "FROM account_snapshot WHERE date BETWEEN ? AND ? ORDER BY date",
+        (monday_str, friday_str)
+    ).fetchall()
+    account_data = [{
+        "date": a[0], "total_asset": a[1], "available_cash": a[2],
+        "stock_value": a[3], "position_ratio": a[4], "total_pnl": a[5], "total_pnl_pct": a[6],
+    } for a in acc_snaps]
+
+    # ==========================================
+    # 2. 构建 LLM Prompt
+    # ==========================================
+    idx_text = "\n".join(
+        f"- {i['name']}({i['code']}): 开{i['week_open']:.2f} → 收{i['week_close']:.2f} "
+        f"(周涨跌 {i['week_chg']:+.2f}%) 每日: {i['daily']}"
+        for i in index_weekly
+    ) if index_weekly else "(无指数数据)"
+
+    pos_text = "\n".join(
+        f"| {p['code']} | {p['name']} | {p['cost']:.2f} | {p['week_close']:.2f} | "
+        f"{p['week_chg']:+.2f}% | {p['total_pnl_pct']:+.1f}% | {p['strategy']} |"
+        for p in sorted(holdings_weekly, key=lambda x: x['week_chg'], reverse=True)
+    ) if holdings_weekly else "(无持仓)"
+    if pos_text:
+        pos_text = "| 代码 | 名称 | 成本 | 周末价 | 周涨跌 | 累计盈亏 | 策略 |\n|------|------|------|--------|--------|----------|------|\n" + pos_text
+
+    b1_text = "\n".join(
+        f"- {b['date']}: B1={b['b1_count']}只 近B1={b['near_count']}只 扫描{b['scanned']}只 "
+        f"耗时{b['elapsed']:.0f}s"
+        for b in b1_weekly
+    ) if b1_weekly else "(无B1数据)"
+
+    tx_text = "\n".join(
+        f"- {t['date']} {t['direction']} {t['code']} {t['name']} {t['qty']}股 @{t['price']:.2f} "
+        f"盈亏:{t['pnl'] if t['pnl'] else 0:.0f} {t['reason'] or ''}"
+        for t in trade_weekly
+    ) if trade_weekly else "(本周无交易)"
+
+    acc_text = "\n".join(
+        f"- {a['date']}: 总资产{a.get('total_asset',0) or 0:.0f} 可用{a.get('available_cash',0) or 0:.0f} "
+        f"市值{a.get('stock_value',0) or 0:.0f} 仓位{a.get('position_ratio',0) or 0:.0f}% "
+        f"总盈亏{a.get('total_pnl',0) or 0:.0f}"
+        for a in account_data
+    ) if account_data else "(无账户快照)"
+
+    # 历史周报参考
+    import glob
+    history = ""
+    for f in sorted(glob.glob(os.path.join(base_dir, "2026-*.md")))[-3:]:
+        try:
+            with open(f, 'r', encoding='utf-8') as fp:
+                history += fp.read()[:1000] + "\n---\n"
         except Exception:
             pass
+
+    prompt = f"""你是资深A股交易复盘教练。请基于以下本周数据，做一份专业的周末复盘。
+
+本周: {week_label}
+生成日期: {today_str}
+
+## 一、指数周表现
+{idx_text}
+
+## 二、持仓周表现
+{pos_text}
+
+## 三、本周交易记录
+{tx_text}
+
+## 四、每日B1扫描
+{b1_text}
+
+## 五、账户快照
+{acc_text}
+
+## 历史周报参考
+{history[:1000] or '(无)'}
+
+---
+
+请按以下结构输出复盘报告（Markdown，从二级标题开始）：
+
+### 一、本周市场回顾
+（指数走势概述、主线板块、市场情绪变化。≥3段）
+
+### 二、持仓表现分析
+（持仓整体盈亏、跑的好的 & 跑的差的。与大盘/板块对比。操作得失。≥3段）
+
+### 三、B1信号回溯
+（本周B1信号准确性回顾：哪些B1真正启动了，哪些是假突破。B1数量变化趋势。≥2段）
+
+### 四、交易复盘
+（本周每一笔交易的复盘：入场/出场是否符合计划、盈亏合理性。≥2段）
+
+### 五、经验教训
+（本周学到什么、做对什么、做错什么。具体案例。≥2段）
+
+### 六、下周计划
+（下周关注标的、计划操作、需要警惕的风险。3-5条具体行动计划。≥2段）
+
+输出规则：
+- 只输出分析内容，不要一级标题
+- 数据来自上方，不得编造
+- 诚实面对错误，不粉饰
+- 结尾: "> 交易是一场马拉松，不是短跑。坚持复盘，持续进化。\n> 不构成投资建议。"
+"""
+
+    llm_text = ""
+    if not args.no_llm:
+        try:
+            from llm.client import chat
+            resp = chat(
+                [{"role": "system",
+                  "content": "你是资深A股交易复盘教练。你帮助交易员诚实面对每一笔交易的对错，提炼经验教训，制定下周计划。尖锐但不刻薄，客观且务实。"},
+                 {"role": "user", "content": prompt}],
+                max_tokens=4096, role="analyst"
+            )
+            if resp:
+                llm_text = resp["content"]
+        except Exception as e:
+            llm_text = f"(LLM 调用失败: {e})"
+
+    # ==========================================
+    # 3. 生成报告
+    # ==========================================
+    report = f"""# 周末复盘 — {week_label}
+
+> 生成: {today_str}
+
+## 数据摘要
+
+### 指数周表现
+
+| 指数 | 周开盘 | 周收盘 | 周涨跌 | 每日涨跌 |
+|------|--------|--------|--------|----------|
+{chr(10).join(f'| {i['name']} | {i['week_open']:.2f} | {i['week_close']:.2f} | {i['week_chg']:+.2f}% | {i['daily']} |' for i in index_weekly)}
+
+{('### 持仓周表现\n' + pos_text) if pos_text else ''}
+
+### 本周交易 ({len(trade_weekly)}笔)
+
+{tx_text}
+
+### 每日B1扫描
+
+{b1_text}
+
+### 账户快照
+
+{acc_text}
+
+---
+
+## LLM 复盘分析
+
+{llm_text or '(LLM未配置/--no-llm 跳过)'}
+
+---
+
+> 数据源: SQLite(kline.db) / DeepSeek (analyst+thinking) | 生成: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+"""
+
+    # 保存
+    daily_path = os.path.join(base_dir, f"{monday_str}_复盘.md")
+    current_path = os.path.join(base_dir, "latest.md")
+    with open(daily_path, 'w', encoding='utf-8') as f:
+        f.write(report)
+    with open(current_path, 'w', encoding='utf-8') as f:
+        f.write(report)
+
+    print(report)
+    print(f"\n[Weekend Review] 已保存: {daily_path}")
+
+    # ==========================================
+    # 4. 飞书发布
+    # ==========================================
+    if args.publish:
+        from reporting.feishu_publisher import publish_report
+        url = publish_report(daily_path, title=f"周末复盘 — {week_label}")
+        if url:
+            print(f"[Feishu] 文档: {url}")
+            try:
+                import subprocess as sp
+                sp.run(["lark-cli", "im", "+messages-send", "--as", "bot",
+                        "--user-id", "ou_d55b9054133a1e411d6c074e2f6eb11c",
+                        "--msg-type", "interactive",
+                        "--content", (
+                            '{{"config":{{"wide_screen_mode":true}},"header":{{"title":{{"tag":"plain_text",'
+                            f'"content":"周末复盘 {week_label}"}},"template":"green"}},'
+                            '"elements":[{{"tag":"markdown","content":"本周复盘 + 经验教训 + 下周计划 '
+                            f'\\n[📄 查看完整报告]({url})"}}]}}'
+                        )], timeout=10)
+            except Exception:
+                pass
 
 
 def _cmd_data_sync(args):
     """纯数据拉取，不计B1，不关注列表"""
+    import sys, io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8') if hasattr(sys.stdout,'buffer') else sys.stdout
     target = args.target
 
     if target == "calendar":
@@ -2010,15 +2949,28 @@ def _cmd_data_sync(args):
         qf = QuoteFetcher()
         quotes = qf.get_index_quotes()
         today = db.conn.execute("SELECT MAX(date) FROM trading_calendar").fetchone()[0]
+        # 取前一日收盘用于计算涨跌幅（myquant 盘后返回 0）
+        prev_map = {}
+        prev_date = db.conn.execute(
+            "SELECT MAX(date) FROM index_daily WHERE date<?", (today,)
+        ).fetchone()[0]
+        if prev_date:
+            for r in db.conn.execute("SELECT code,close FROM index_daily WHERE date=?", (prev_date,)).fetchall():
+                prev_map[r[0]] = r[1]
         print("指数行情:")
         for q in quotes:
-            chg = q.get("change_pct", 0) or 0
-            print(f"  {q['name']}({q['code']}): {q.get('price','?')} ({chg:+.2f}%) [{q.get('source','?')}]")
-            # 写入 index_daily
-            if q.get("price", 0) > 0:
+            price = q.get("price", 0) or 0
+            if price > 0:
+                # myquant 返回的 change_pct 盘后为 0，从前日 close 计算
+                prev = prev_map.get(q["code"])
+                if prev and prev > 0:
+                    chg = (price - prev) / prev * 100
+                else:
+                    chg = q.get("change_pct", 0) or 0
+                print(f"  {q['name']}({q['code']}): {price:.2f} ({chg:+.2f}%) [{q.get('source','?')}]")
                 db.conn.execute(
                     "INSERT OR REPLACE INTO index_daily(code,date,close,change_pct,source) VALUES(?,?,?,?,?)",
-                    (q["code"], today, q["price"], q["change_pct"], q.get("source", ""))
+                    (q["code"], today, price, chg, q.get("source", ""))
                 )
         db.conn.commit()
         cnt = db.conn.execute("SELECT COUNT(*) FROM index_daily WHERE date=?", (today,)).fetchone()[0]
@@ -2028,12 +2980,27 @@ def _cmd_data_sync(args):
     # target == "kline"
     from storage.kline_filler import ensure_candles
 
+    # === 统一前置：决定拉哪个交易日 ===
+    from data_source.sync_date import resolve_sync_target
+    target_date, action = resolve_sync_target()
+
+    if action == "skip":
+        print(f"[Data Sync] {action} — 无需拉取")
+        return
+
+    print(f"[Data Sync] action={action} date={target_date}")
+    # 用 target_date 作为 end_date（增量拉取从现有最新到 target_date）
+    from storage.db import get_db
+    db = get_db()
+    db.ensure_trading_calendar()
+    today = target_date  # 用统一判定的日期
+
     codes = []
     if args.code:
         codes = [args.code]
     elif args.market:
         from config.blacklist import blacklist as bl
-        print(f"[Data Sync] 全市场K线（不定时指标，不算B1）...")
+        print(f"[Data Sync] 全市场K线{'（全量初始化）' if args.init else '（增量）'}...")
         print(f"  {bl.summary()}")
         all_codes, name_map = _get_all_stock_codes()
         codes = [c for c in all_codes if not bl.is_banned(c, name_map.get(c, ""))]
@@ -2047,15 +3014,81 @@ def _cmd_data_sync(args):
         print("请指定 --code / --market / --all")
         return
 
+    if args.init:
+        # === 全量初始化：批量删旧 → 掘金批量直拉125天 → 写source ===
+        from data_source.fetchers.myquant_fetcher import MyQuantFetcher
+        mq = MyQuantFetcher()
+        BATCH = 200
+        ok = fail = 0
+        for batch_start in range(0, len(codes), BATCH):
+            batch = codes[batch_start:batch_start + BATCH]
+            print(f"  批次[{batch_start+1}-{batch_start+len(batch)}/{len(codes)}] 掘金批量拉取...")
+            results = mq.get_kline_batch(batch, '2025-12-01', today)
+            for code, rows in results.items():
+                if rows and len(rows) >= 100:
+                    db.conn.execute("DELETE FROM stock_daily WHERE code=?", (code,))
+                    for r in rows:
+                        db.conn.execute(
+                            'INSERT OR REPLACE INTO stock_daily(code,date,open,high,low,close,volume,amount,source) VALUES(?,?,?,?,?,?,?,?,?)',
+                            (code, r['date'], r.get('open', 0), r.get('high', 0), r.get('low', 0),
+                             r['close'], r.get('volume', 0), r.get('amount', 0), 'myquant'))
+                    ok += 1
+                else:
+                    fail += 1
+            db.conn.commit()
+            mq_cnt = db.conn.execute("SELECT COUNT(DISTINCT code) FROM stock_daily WHERE source='myquant'").fetchone()[0]
+            print(f"    完成批次 ok={ok} fail={fail} myquant累计={mq_cnt}")
+        print(f"\n初始化完成: ok={ok} fail={fail}")
+        return
+
+    # === 增量模式：掘金批量一级 → 失败回退单只级联 ===
+    from data_source.fetchers.myquant_fetcher import MyQuantFetcher
+    from storage.kline_filler import ensure_candles
+
+    # Step 1: 掘金批量拉取（最高权重，支持 batch，一次 subprocess 处理 200 只）
+    mq = MyQuantFetcher()
+    BATCH = 200
     ok = fail = 0
-    for i, code in enumerate(codes):
-        if i % 100 == 0:
-            print(f"  [{i+1}/{len(codes)}] ok={ok} fail={fail}")
-        candles = ensure_candles(code, required_days=args.days)
-        if candles and len(candles) >= args.days:
-            ok += 1
-        else:
-            fail += 1
+    failed_codes = []
+    for batch_start in range(0, len(codes), BATCH):
+        batch = codes[batch_start:batch_start + BATCH]
+        p = f"[{batch_start+1}-{min(batch_start+BATCH, len(codes))}/{len(codes)}]"
+        sys.stdout.write(f"  {p} 掘金批量... "); sys.stdout.flush()
+        results = mq.get_kline_batch(batch, today, today)
+        b_ok = b_fail = 0
+        for code, rows in results.items():
+            if rows and len(rows) > 0:
+                for r in rows:
+                    if r.get('date', '') == today:
+                        db.conn.execute(
+                            'INSERT OR REPLACE INTO stock_daily(code,date,open,high,low,close,volume,source) VALUES(?,?,?,?,?,?,?,?)',
+                            (code, today, r.get('open', 0), r.get('high', 0), r.get('low', 0),
+                             r['close'], r.get('volume', 0), 'myquant'))
+                        b_ok += 1; break
+                else:
+                    b_fail += 1; failed_codes.append(code)
+            else:
+                b_fail += 1; failed_codes.append(code)
+        ok += b_ok; fail += b_fail
+        db.conn.commit()
+        print(f"ok={b_ok} fail={b_fail}")
+    print(f"  掘金批量: ok={ok} fail={fail}")
+
+    # Step 2: 掘金失败的，走单只级联链（腾讯→baostock→...）
+    if failed_codes:
+        print(f"  级联回退: {len(failed_codes)}只...")
+        c2_ok = c2_fail = 0
+        for i, code in enumerate(failed_codes):
+            if i % 100 == 0:
+                print(f"    [{i+1}/{len(failed_codes)}] ok={c2_ok} fail={c2_fail}")
+            candles = ensure_candles(code, required_days=args.days)
+            if candles and len(candles) >= args.days:
+                c2_ok += 1
+            else:
+                c2_fail += 1
+        ok += c2_ok; fail = c2_fail  # fail 重置为最终失败数
+        print(f"  级联回退: ok={c2_ok} fail={c2_fail}")
+
     print(f"\n完成: ok={ok} fail={fail}")
 
 
@@ -2293,24 +3326,34 @@ def main():
     p_trend.add_argument("--symbol", "-s", required=True, help="股票代码")
     p_trend.add_argument("--days", type=int, default=125, help="K线天数")
 
-    # === 日更（含趋势） ===
-    p_du = sub.add_parser("daily-update", help="日更全流程（K线+B1+趋势+关注列表分层）")
-    p_du.add_argument("--days", type=int, default=125, help="需要多少交易日数据")
-
-    # === scan — 选股引擎 ===
-    p_scan = sub.add_parser("scan", help="选股引擎（B1+缩量爆发，数据不足自动补）")
+    # === scan — 每日全市场扫描（B1+趋势黄白线+缩量蓄爆） ===
+    p_scan = sub.add_parser("scan", help="每日全市场扫描（B1+趋势黄白线+缩量蓄爆→关注列表分层）")
     p_scan.add_argument("--name", "-n", help="板块名（theme_chains映射）")
     p_scan.add_argument("--market", action="store_true", help="全市场扫描")
     p_scan.add_argument("--codes", help="指定代码列表（逗号分隔）")
-    p_scan.add_argument("--days", type=int, default=114, help="需要多少交易日")
+    p_scan.add_argument("--days", type=int, default=125, help="需要多少交易日（TrendAnalyzer需MA114+10天=125）")
     p_scan.add_argument("--auto-save", action="store_true", help="B1→重点关注, 近B1→普通关注")
     p_scan.add_argument("--ai", action="store_true", help="LLM板块叙事增强（需ZX_LLM_API_KEY）")
 
     # === market report ===
-    p_mr = sub.add_parser("market-report", help="市场环境报告（指数+板块+主线+WebSearch→LLM）")
+    p_mr = sub.add_parser("market-report", help="市场环境报告（指数+板块+持仓+WebSearch+LLM）")
     p_mr.add_argument("--theme", help="主线专题深度分析")
     p_mr.add_argument("--no-search", action="store_true", help="不用Web Search")
-    p_mr.add_argument("--output", "-o", help="输出路径")
+    p_mr.add_argument("--no-llm", action="store_true", help="只出数据表格，不调LLM")
+    p_mr.add_argument("--publish", action="store_true", default=False, help="生成后发布到飞书文档")
+    p_mr.add_argument("--output", "-o", help="输出路径（指定则只写文件不打印）")
+
+    # === weekend news ===
+    p_wn = sub.add_parser("weekend-news", help="周末外环境报告（6维度Tavily搜索→LLM→下周交易前瞻）")
+    p_wn.add_argument("--no-search", action="store_true", help="不用Web Search")
+    p_wn.add_argument("--no-llm", action="store_true", help="只出搜索数据，不调LLM")
+    p_wn.add_argument("--publish", action="store_true", default=False, help="生成后发布到飞书文档")
+
+    # === weekend review ===
+    p_wr = sub.add_parser("weekend-review", help="周末复盘（本周数据回顾+经验教训+下周计划）")
+    p_wr.add_argument("--no-llm", action="store_true", help="只出数据表格，不调LLM")
+    p_wr.add_argument("--publish", action="store_true", default=False, help="生成后发布到飞书文档")
+    p_wr.add_argument("--week", "-w", help="指定周 (YYYY-MM-DD, 取周一)")
 
     # === find — 智能选股 ===
     p_find = sub.add_parser("find", help="智能选股（板块→扫描→B1+趋势，支持模糊语义）")
@@ -2328,6 +3371,7 @@ def main():
     p_ds.add_argument("--market", action="store_true", help="全市场")
     p_ds.add_argument("--all", action="store_true", help="全部已有股票")
     p_ds.add_argument("--days", type=int, default=114, help="需要多少交易日数据")
+    p_ds.add_argument("--init", action="store_true", help="全量初始化：删旧数据，掘金直拉125天，不计增量")
 
     args = parser.parse_args()
 
@@ -2444,10 +3488,6 @@ def main():
     elif args.command == "trend":
         cmd_trend(args)
 
-    # === 日更全流程 ===
-    elif args.command == "daily-update":
-        cmd_daily_update(args)
-
     # === 选股引擎 ===
     elif args.command == "scan":
         cmd_scan(args)
@@ -2455,6 +3495,14 @@ def main():
     # === 市场环境报告 ===
     elif args.command == "market-report":
         cmd_market_report(args)
+
+    # === 周末外环境报告 ===
+    elif args.command == "weekend-news":
+        cmd_weekend_news(args)
+
+    # === 周末复盘 ===
+    elif args.command == "weekend-review":
+        cmd_weekend_review(args)
 
     # === find 智能选股 ===
     elif args.command == "find":

@@ -26,7 +26,7 @@ HEADERS = {
 
 def _to_tencent_symbol(code: str) -> str:
     """纯数字 → 腾讯代码格式: sz002693 / sh600276"""
-    if code.startswith(("6", "9")):
+    if code.startswith(("5", "6", "9")):
         return f"sh{code}"
     return f"sz{code}"
 
@@ -40,22 +40,22 @@ class TencentFetcher:
     def is_available(self) -> bool:
         return True
 
-    def get_kline(self, code: str, start_date: str, end_date: str) -> Optional[List[dict]]:
+    def get_kline(self, code: str, start_date: str, end_date: str,
+                  adjust: str = "qfq") -> Optional[List[dict]]:
         """
-        获取日K线（前复权 qfq）。
+        获取日K线。
 
         code: 纯数字，如 "002693"
-        start_date/end_date: 由级联管理器通过交易日历统一计算，各数据源共享。
-        腾讯 API 不支持服务端日期过滤，拉取数量 = 日历天数 × 1.6，客户端过滤。
+        start_date/end_date: 由级联管理器通过交易日历统一计算
+        adjust: "qfq"(前复权,股票默认) | "none"(ETF/指数用)
         """
         try:
-            # 拉取量 = 日历天数，一笔不多。不够由上层往前补
             s = datetime.strptime(start_date, "%Y-%m-%d")
             e = datetime.strptime(end_date, "%Y-%m-%d")
             count = max((e - s).days + 1, 1)
 
             provider = _to_tencent_symbol(code)
-            param = f"{provider},day,,,{count},qfq"
+            param = f"{provider},day,,,{count},{adjust}"
 
             resp = requests.get(
                 TENCENT_KLINE_URL,
@@ -67,7 +67,8 @@ class TencentFetcher:
             payload = resp.json()
 
             node = payload.get("data", {}).get(provider, {})
-            rows = node.get("qfqday") or node.get("day") or node.get("data") or []
+            adj_key = "qfqday" if adjust == "qfq" else "day"
+            rows = node.get(adj_key) or node.get("day") or node.get("data") or []
 
             if not rows:
                 return None

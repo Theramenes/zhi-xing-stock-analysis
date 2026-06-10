@@ -1,0 +1,8 @@
+{
+  "env": {
+    "ZX_LLM_DEEPSEEK_KEY": "sk-db429cd36dc545e2996784fe4413b43a",
+    "ZX_LLM_QWEN_KEY": "sk-cbced41d22de40ae904cd1a23f329048",
+    "TAVILY_API_KEY": "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",
+    "ZX_MYQUANT_TOKEN": "4e953e6dbe255778d1775c64a5bcf1ad463a6508"
+  }
+}

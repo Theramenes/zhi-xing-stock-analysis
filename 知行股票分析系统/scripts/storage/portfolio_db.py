@@ -492,7 +492,7 @@ def record_watchlist_daily(code: str, indicators: dict) -> bool:
              _safe_json(sigs),
              1 if indicators.get("超缩量") else 0,
              1 if indicators.get("洗盘异动") else 0,
-             "")
+             indicators.get("status_change", "") or "")
         )
         db.conn.commit()
         return True

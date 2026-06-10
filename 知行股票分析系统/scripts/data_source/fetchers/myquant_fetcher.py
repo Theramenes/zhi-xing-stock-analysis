@@ -29,7 +29,7 @@ if not _PYTHON:
 
 def _to_myquant_symbol(code: str) -> str:
     """002693 → SZSE.002693, 600276 → SHSE.600276"""
-    prefix = "SHSE" if code.startswith(("6", "9")) else "SZSE"
+    prefix = "SHSE" if code.startswith(("5", "6", "9")) else "SZSE"
     return f"{prefix}.{code}"
 
 
@@ -45,6 +45,61 @@ class MyQuantFetcher:
 
     def is_available(self) -> bool:
         return self._ready
+
+    def get_kline_batch(self, codes: List[str], start_date: str, end_date: str) -> dict:
+        """批量拉取K线。脚本写入临时文件执行，避免 -c 长度/PIPE 截断。"""
+        if not self._ready:
+            return {}
+        import tempfile, atexit
+        token = self._token
+
+        lines = ["from gm.api import *", f"set_token('{token}')", "import json", "results = {}"]
+        for code in codes:
+            symbol = _to_myquant_symbol(code)
+            lines.append(
+                f"try:\n"
+                f"    data = history(symbol='{symbol}', frequency='1d',"
+                f" start_time='{start_date}', end_time='{end_date}',"
+                f" fields='eob,open,high,low,close,volume', adjust=ADJUST_PREV, df=True)\n"
+                f"    results['{code}'] = [{{'date':str(r.eob)[:10],'open':r.open,"
+                f"'high':r.high,'low':r.low,'close':r.close,'volume':int(r.volume)}}"
+                f" for _,r in data.iterrows()] if data is not None and not data.empty else []\n"
+                f"except Exception as e:\n    results['{code}'] = []\n"
+            )
+        lines.append("print(json.dumps(results, ensure_ascii=False))")
+        script = "\n".join(lines)
+
+        tmpdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_mq_tmp")
+        os.makedirs(tmpdir, exist_ok=True)
+        tmpf = tempfile.NamedTemporaryFile(mode="w", suffix=".py", dir=tmpdir, delete=False, encoding="utf-8")
+        tmpf.write(script)
+        tmpf.close()
+
+        try:
+            r = subprocess.run(
+                [_PYTHON, "-u", tmpf.name],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=600,
+            )
+            os.unlink(tmpf.name)
+            if r.returncode != 0 or not r.stdout.strip():
+                return {}
+            data = json.loads(r.stdout.strip())
+            result = {}
+            for code, candles in data.items():
+                for c in candles:
+                    vol = abs(c.get("volume", 0))
+                    c["volume"] = vol / 100 if vol > 100000 else vol
+                result[code] = candles if candles else None
+            return result
+        except subprocess.TimeoutExpired:
+            try: os.unlink(tmpf.name)
+            except: pass
+            return {}
+        except Exception:
+            try: os.unlink(tmpf.name)
+            except: pass
+            return {}
 
     def get_kline(self, code: str, start_date: str, end_date: str) -> Optional[List[dict]]:
         if not self._ready:
@@ -69,9 +124,9 @@ class MyQuantFetcher:
 
         try:
             r = subprocess.run(
-                [_PYTHON, "-c", script],
-                capture_output=True, text=True, timeout=30,
-                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+                [_PYTHON, "-u", "-c", script],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, timeout=30,
             )
             if r.returncode != 0 or not r.stdout.strip():
                 return None

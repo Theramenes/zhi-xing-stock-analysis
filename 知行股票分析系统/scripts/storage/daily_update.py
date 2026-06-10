@@ -39,7 +39,7 @@ def daily_update(code: str, required_days: int = 114):
         rows = [{"date": c.date, "open": c.open, "high": c.high,
                  "low": c.low, "close": c.close, "volume": c.volume}
                 for c in resp.candles]
-        n = db.upsert_candles(code, rows)
+        n = db.upsert_candles(code, rows, source="ifind")
         print(f"{n}条", end="")
     else:
         print("跳过", end="")
@@ -63,7 +63,7 @@ def daily_update(code: str, required_days: int = 114):
                 rows = [{"date": c.date, "open": c.open, "high": c.high,
                          "low": c.low, "close": c.close, "volume": c.volume}
                         for c in resp.candles]
-                db.upsert_candles(code, rows)
+                db.upsert_candles(code, rows, source="ifind")
                 filled += len(rows)
             time.sleep(0.1)
         print(f"{filled}条")
@@ -79,7 +79,7 @@ def daily_update(code: str, required_days: int = 114):
                 rows = [{"date": c.date, "open": c.open, "high": c.high,
                          "low": c.low, "close": c.close, "volume": c.volume}
                         for c in resp.candles]
-                db.upsert_candles(code, rows)
+                db.upsert_candles(code, rows, source="ifind")
             time.sleep(0.3)
 
     candles = db.get_candles(code, required_days)

@@ -84,6 +84,17 @@ CREATE INDEX IF NOT EXISTS idx_si_sector ON sector_index(sector_name, sector_typ
 CREATE INDEX IF NOT EXISTS idx_si_code ON sector_index(code);
 
 -- ============================================================
+-- 核心 ETF 板块映射
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS etf_sector (
+    code  TEXT PRIMARY KEY,
+    name  TEXT,
+    sector TEXT,       -- 对应板块/行业
+    sector_type TEXT   -- concept / industry / broad
+);
+
+-- ============================================================
 -- 持仓
 -- ============================================================
 
@@ -385,27 +396,28 @@ class StockDB:
     # 写入
     # ============================================================
 
-    def upsert(self, code: str, rows: List[dict]) -> int:
+    def upsert(self, code: str, rows: List[dict], source: str = "") -> int:
         """
-        批量插入或更新。rows 格式: [{date, open, high, low, close, volume, amount, turnover, amplitude, change_pct}, ...]
+        批量插入或更新。rows 格式: [{date, open, high, low, close, volume, amount, turnover, amplitude, change_pct, source?}, ...]
         返回实际写入行数。
         """
         count = 0
         with self.conn:
             for r in rows:
+                src = r.get("source", source) or source or ""
                 self.conn.execute(
-                    """INSERT OR REPLACE INTO stock_daily (code, date, open, high, low, close, volume, amount, turnover, amplitude, change_pct)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    """INSERT OR REPLACE INTO stock_daily (code, date, open, high, low, close, volume, amount, turnover, amplitude, change_pct, source)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (code, r["date"], r.get("open"), r.get("high"),
                      r.get("low"), r.get("close"), r.get("volume"),
-                     r.get("amount"), r.get("turnover"), r.get("amplitude"), r.get("change_pct"))
+                     r.get("amount"), r.get("turnover"), r.get("amplitude"), r.get("change_pct"), src)
                 )
                 count += 1
         return count
 
-    def upsert_candles(self, code: str, candles: List[dict]) -> int:
+    def upsert_candles(self, code: str, candles: List[dict], source: str = "") -> int:
         """便利方法：candles 格式兼容 b1_calculator 的输入"""
-        return self.upsert(code, candles)
+        return self.upsert(code, candles, source=source)
 
     # ============================================================
     # 查询

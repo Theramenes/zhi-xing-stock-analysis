@@ -45,9 +45,11 @@ def scan(code: str, name: str, candles: list,
         ])
         vr = b['volume'] / avg_v if avg_v > 0 else 0
 
-        # Step1: 爆量+收阳+前期不涨
+        # Step1: 爆量+收阳（close>open，真阳线）+前期不涨
         if b['close'] <= pre or vr < V:
             continue
+        if b['close'] <= b['open']:
+            continue  # 假阳线/阴线，不算爆量
         d_gain = (
             (candles[idx - 1]['close'] - candles[idx - D]['close'])
             / candles[idx - D]['close'] * 100
@@ -62,17 +64,17 @@ def scan(code: str, name: str, candles: list,
         boom_chg = (B_close - pre) / pre * 100
         support = B_open * (1 + day_gain * N)
 
-        # Step2: 次日验证
+        # Step2: 次日验证 — 必须真正缩量（相对均量，不只看爆量日）
         d2 = candles[idx + 1]
-        d2r = d2['volume'] / B_vol
+        d2r = d2['volume'] / B_vol       # 相对爆量日缩量比
+        d2r_avg = d2['volume'] / avg_v   # 相对均量比（关键：防"假缩量"）
         d2chg = (d2['close'] - B_close) / B_close
 
-        if d2r < S and d2chg < 0:
+        # 次日必须：①相对爆量日缩量(d2r<S) ②相对均量不暴增(d2r_avg<V) ③收跌
+        if d2r < S and d2chg < 0 and d2r_avg < V:
             pass  # 正常缩量模式
-        elif d2r >= S and d2chg > 0:
-            continue  # 次日放量涨，不算缩爆
         else:
-            continue
+            continue  # 次日放量/收涨/假缩量，不成立
 
         # Step3: 追踪后续
         hold = 1

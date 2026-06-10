@@ -24,11 +24,11 @@ def ensure_candles(code: str, required_days: int = 114) -> List[dict]:
 
     candles = db.get_candles(code, required_days)
 
-    # 缓存有效条件：条数够 + 日期覆盖到最近交易日
-    db.ensure_trading_calendar()
-    latest_td = db.conn.execute("SELECT MAX(date) FROM trading_calendar").fetchone()[0]
+    # 缓存有效：条数够 + 覆盖到最近交易日（不是 date.today()，盘中无新数据）
     cached_max = max(c["date"] for c in candles) if candles else ""
-
+    latest_td = db.conn.execute(
+        "SELECT MAX(date) FROM trading_calendar WHERE date <= date('now')"
+    ).fetchone()[0]
     if len(candles) >= required_days and cached_max >= latest_td:
         return candles
 

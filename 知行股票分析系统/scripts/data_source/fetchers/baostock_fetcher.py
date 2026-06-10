@@ -37,7 +37,7 @@ class BaostockFetcher:
             return None
 
         # baostock 格式: sh.600519 或 sz.000001
-        prefix = "sh" if code.startswith(('6', '9')) else "sz"
+        prefix = "sh" if code.startswith(('5', '6', '9')) else "sz"
         bs_code = f"{prefix}.{code}"
 
         try:

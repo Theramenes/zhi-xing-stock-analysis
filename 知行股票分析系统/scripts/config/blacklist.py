@@ -32,9 +32,11 @@ class Blacklist:
         # 精确代码排除
         if code in self.ban_codes:
             return True
-        # ST 排除
-        if self.ban_st and name and ('ST' in name.upper() or '*ST' in name.upper()):
-            return True
+        # ST/PT/退市 排除
+        if self.ban_st and name:
+            upper = name.upper()
+            if 'ST' in upper or 'PT' in upper or '退' in name:
+                return True
         return False
 
     def filter_stocks(self, stocks: list, code_attr: str = "code", name_attr: str = "name") -> list:

@@ -48,23 +48,61 @@ class KlineFetchCoordinator:
         """
         db = get_db()
         db.ensure_trading_calendar()
-        end_date = datetime.now().strftime("%Y-%m-%d")
+        end_date = db.conn.execute("SELECT MAX(date) FROM trading_calendar").fetchone()[0]
+        all_cal = db.get_trading_days("2020-01-01", end_date)
 
-        start_date = self.compute_start_date(end_date, required_trading_days)
-        if not start_date:
+        existing = db.get_candles(code, 500)
+        existing = existing or []
+        existing_map = {c["date"]: c for c in existing}
+        existing_dates = set(existing_map.keys())
+
+        if not existing:
+            # 新股：全量拉
+            start_date = self.compute_start_date(end_date, required_trading_days)
+            if start_date:
+                candles, source = self._cascade_fetch(code, start_date, end_date)
+                if candles:
+                    db.upsert_candles(code, candles, source=source)
+                    return candles, source
             return None, "none"
 
-        # 主拉取
-        candles, source = self._cascade_fetch(code, start_date, end_date)
+        # 两段缺口检测
+        existing_max = max(existing_dates)
 
-        # 补缺
-        if candles and len(candles) < required_trading_days:
-            candles = self._iterative_backfill(code, required_trading_days, candles, start_date, end_date)
+        # 缺口1: 尾部 — 已有最后一天 < 日历最后一天
+        tail_gap = [d for d in all_cal if d > existing_max and d <= end_date]
+
+        # 缺口2: 头部 — 需要125天但只有114天，最早的10天缺失
+        head_gap = []
+        if len(existing_dates) < required_trading_days:
+            head_needed = required_trading_days - len(existing_dates)
+            existing_min = min(existing_dates)
+            # 找 existing_min 左边的交易日
+            all_before = [d for d in all_cal if d < existing_min]
+            head_gap = all_before[-head_needed:] if len(all_before) >= head_needed else all_before
+
+        # 无缺口 → 直接返回
+        if not tail_gap and not head_gap:
+            return existing, "sqlite"
+
+        # 只拉缺口，不漏拉全量
+        pull_start = (head_gap[0] if head_gap else end_date)
+        pull_end = end_date
+        gap_total = len(head_gap) + len(tail_gap)
+        print(f"  [delta] {code} 缺{gap_total}天(尾{len(tail_gap)}+头{len(head_gap)}) {pull_start}~{pull_end}")
+
+        gap_candles, src = self._cascade_fetch(code, pull_start, pull_end)
+        if gap_candles:
+            for c in gap_candles:
+                existing_map[c["date"]] = c
+        merged = sorted(existing_map.values(), key=lambda x: x["date"])
+        db.upsert_candles(code, merged, source=src)
+        return merged, src
 
         # 写入 SQLite
         if candles:
             try:
-                db.upsert_candles(code, candles)
+                db.upsert_candles(code, candles, source=source)
             except Exception:
                 pass
 
@@ -150,8 +188,9 @@ class KlineFetchCoordinator:
     # 级联拉取
     # ================================================================
 
-    # 东财系数据源（需要用代理轮转）
+    # 东财系（需代理+熔断）vs 本地/免费系（无需熔断）
     _EASTMONEY_SOURCES = {"em_direct", "efinance", "akshare"}
+    _NO_FUSE_SOURCES = {"myquant", "tencent", "baostock"}  # 本地终端/腾讯/证券宝，不会被封
 
     def _call_fetcher(self, name: str, src, code: str, start_date: str, end_date: str) -> Optional[List[dict]]:
         """调用 fetcher。东财系源注入代理轮转。"""
@@ -189,12 +228,28 @@ class KlineFetchCoordinator:
                     print(f"[FAIL]{type(e).__name__}")
                 break  # iFind 只试一次
 
-        # 3. 免费源链路（带熔断/节流/退避）
+        # 3. 免费源链路
+        # myquant/tencent/baostock 本地或免费HTTP，不走熔断/节流
+        # em_direct/efinance/akshare 东财系远程，带熔断/节流/退避
         now = time.time()
         for name, src, _ in self._sources:
             if name == "ifind":
                 continue
 
+            if name in self._NO_FUSE_SOURCES:
+                # 本地/免费源：直接调用，不熔断不节流
+                try:
+                    print(f"  [{name}] 尝试 {code} {start_date}~{end_date}...", end=" ")
+                    candles = src.get_kline(code, start_date, end_date)
+                    if candles and len(candles) >= 5:
+                        print(f"[OK]{len(candles)}条")
+                        return candles, name
+                    print("[FAIL]空/不足")
+                except Exception as e:
+                    print(f"[FAIL]{type(e).__name__}: {str(e)[:60]}")
+                continue
+
+            # 东财系远程源：带熔断/节流/退避
             if self._is_fused(name, now):
                 remain = int(self._cooldown_until[name] - now)
                 print(f"  [{name}] 熔断中 {remain}s，跳过")
